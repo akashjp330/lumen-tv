@@ -74,6 +74,13 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
     }
     fun pick(id: String, action: () -> Unit) { vm.focusMemory["searchItem"] = id; action() }
 
+    // Coming back with results: land on the one you picked (or the search box if it's gone).
+    LaunchedEffect(Unit) {
+        if (editing) return@LaunchedEffect
+        if (restoreId == null) { delay(80); runCatching { barFr.requestFocus() } }
+        else { delay(900); if (!restored) { restored = true; runCatching { barFr.requestFocus() } } }
+    }
+
     val results by produceState(Results(), query, catalog, repo.guide) {
         delay(300)
         vm.focusMemory["search"] = query
@@ -122,7 +129,6 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
                 }
                 Box(Modifier.matchParentSize().border(1.dp, if (f) LocalAccent.current else C.Line, RoundedCornerShape(6.dp)))
             }
-            if (restored) LaunchedEffect(Unit) { delay(80); runCatching { barFr.requestFocus() } }
         }
         Spacer(Modifier.height(14.dp))
         if (query.trim().length >= 2 && results.isEmpty) Text("Nothing found for \"$query\"", style = T.body)
