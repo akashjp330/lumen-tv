@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import lumen.core.AccountInfo
 import lumen.core.AuthException
@@ -19,33 +21,46 @@ import lumen.core.CachingFetcher
 import lumen.core.Catalog
 import lumen.core.Channel
 import lumen.core.ContentType
+import lumen.core.EpgChannel
 import lumen.core.EpgIndex
+import lumen.core.Guide
 import lumen.core.LogScrubber
 import lumen.core.Program
+import lumen.core.ProgramStore
 import lumen.core.Source
 import lumen.core.SourceLoader
+import lumen.core.StoreGuide
 import lumen.core.UrlConnectionFetcher
-import lumen.core.XmltvData
 import java.io.File
 import java.io.IOException
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 data class RepoState(
     val source: Source? = null,
     val catalog: Catalog? = null,
-    val guide: EpgIndex = EpgIndex.EMPTY,
-    val xmltv: XmltvData? = null,
+    val guide: Guide = EpgIndex.EMPTY,
+    /** Every channel listed in the guide file, for the "Fix guide match" picker. */
+    val epgChannels: List<EpgChannel> = emptyList(),
     /** Non-null while the first load is running; shown on the splash. */
     val loading: String? = null,
     val refreshing: Boolean = false,
     val guideLoading: Boolean = false,
+    /** Listings saved so far while the guide downloads. */
+    val guideProgress: Int = 0,
     val error: String? = null,
     val guideError: String? = null,
+    /** When channels and guide were last downloaded from the provider. */
     val lastRefreshMs: Long = 0,
 )
 
 /**
- * Loads and caches everything for the active provider. Opens from the disk cache
- * instantly, then refreshes in the background when the cache is stale.
+ * Loads and caches everything for the active provider. Opens from what's saved
+ * on the device instantly, then refreshes in the background when it's stale.
+ *
+ * Channels, movies and series are kept in memory (they're small even for huge
+ * providers). The guide lives in a database on the device ([GuideDb]) and only
+ * the rows on screen are read.
  */
 class Repository(private val context: Context, val store: Store) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -60,8 +75,13 @@ class Repository(private val context: Context, val store: Store) {
 
     private var loadJob: Job? = null
     private var periodicJob: Job? = null
+    private val refreshLock = Mutex()
+    @Volatile private var guideDb: GuideDb? = null
+    @Volatile private var programStore: ProgramStore? = null
 
     private fun cacheDir(source: Source) = File(context.cacheDir, "src_${source.id}")
+    private val sp = context.getSharedPreferences("lumen_refresh", Context.MODE_PRIVATE)
+    private fun savedRefresh(source: Source) = sp.getLong("last_${source.id}", 0)
 
     /** Called at app start and whenever the active provider changes. */
     fun start() {
@@ -69,87 +89,106 @@ class Repository(private val context: Context, val store: Store) {
         if (store.activeId.value != source.id) store.setActive(source.id)
         loadJob?.cancel()
         loader = SourceLoader(source, net)
-        _state.value = RepoState(source = source, loading = "Starting")
+        onDemand.clear(); asked.clear()
+        val db = GuideDb(context, source.id).also { guideDb = it }
+        programStore = null
+        _state.value = RepoState(source = source, loading = "Starting", lastRefreshMs = savedRefresh(source))
         loadJob = scope.launch {
-            val dir = cacheDir(source)
-            val cachedLoader = SourceLoader(source, CachingFetcher(dir, net, cacheFirst = true))
+            val cachedLoader = SourceLoader(source, CachingFetcher(cacheDir(source), net, cacheFirst = true))
             try {
                 val catalog = cachedLoader.loadCatalog { step -> _state.update { it.copy(loading = step) } }
                 _state.update { it.copy(catalog = catalog, loading = null, error = null) }
                 DiagLog.log("Loaded ${catalog.channels.size} channels, ${catalog.movies.size} movies, ${catalog.series.size} series")
-                loadGuide(cachedLoader, catalog)
+                // The saved guide opens in a moment; no download needed.
+                db.open()?.let { ps ->
+                    programStore = ps
+                    applyGuide(catalog, ps)
+                    DiagLog.log("Opened saved guide (${ps.idsWithData().size} guide channels)")
+                }
             } catch (e: Exception) {
                 DiagLog.log("Initial load failed", e)
                 _state.update { it.copy(loading = null, error = friendly(e)) }
             }
-            val age = CachingFetcher(dir, net, true).cachedAgeMs(cachedLoader.xtream?.apiUrl("get_live_streams")
-                ?: (source as Source.M3u).playlistUrl, System.currentTimeMillis())
-            if (age == null || age > STALE_MS || _state.value.catalog == null) refreshNow()
+            val last = savedRefresh(source)
+            val stale = System.currentTimeMillis() - last > STALE_MS
+            if (stale || !db.exists || _state.value.catalog == null) refreshNow()
         }
         periodicJob?.cancel()
         periodicJob = scope.launch {
             while (isActive) {
-                delay(GUIDE_REFRESH_MS)
-                refresh()
+                delay(AUTO_REFRESH_MS)
+                refreshNow()
             }
         }
     }
 
+    /** The Refresh button: re-download channels, movies, series and the guide. */
     fun refresh() { scope.launch { refreshNow() } }
 
     private suspend fun refreshNow() {
-        val source = _state.value.source ?: return
-        if (_state.value.refreshing) return
-        _state.update { it.copy(refreshing = true) }
-        try {
-            val fresh = SourceLoader(source, CachingFetcher(cacheDir(source), net, cacheFirst = false))
-            val catalog = fresh.loadCatalog()
-            onDemand.clear(); asked.clear()
-            _state.update { it.copy(catalog = catalog, error = null, lastRefreshMs = System.currentTimeMillis()) }
-            DiagLog.log("Refreshed: ${catalog.channels.size} channels")
-            loadGuide(fresh, catalog)
-        } catch (e: Exception) {
-            DiagLog.log("Refresh failed", e)
-            if (_state.value.catalog == null) _state.update { it.copy(error = friendly(e)) }
-        } finally {
-            _state.update { it.copy(refreshing = false) }
+        if (refreshLock.isLocked) return
+        refreshLock.withLock {
+            val source = _state.value.source ?: return
+            _state.update { it.copy(refreshing = true) }
+            try {
+                val fresh = SourceLoader(source, CachingFetcher(cacheDir(source), net, cacheFirst = false))
+                val catalog = fresh.loadCatalog()
+                onDemand.clear(); asked.clear()
+                val now = System.currentTimeMillis()
+                sp.edit().putLong("last_${source.id}", now).apply()
+                _state.update { it.copy(catalog = catalog, error = null, lastRefreshMs = now) }
+                DiagLog.log("Refreshed: ${catalog.channels.size} channels, ${catalog.movies.size} movies, ${catalog.series.size} series")
+                buildGuide(source, catalog)
+            } catch (e: Exception) {
+                DiagLog.log("Refresh failed", e)
+                if (_state.value.catalog == null) _state.update { it.copy(error = friendly(e)) }
+                else _state.update { it.copy(guideError = friendly(e)) }
+            } finally {
+                _state.update { it.copy(refreshing = false) }
+            }
         }
     }
 
-    /** Re-matches the guide after the user fixes a channel's guide match (no download). */
-    fun rebuildGuideMatches() {
-        val s = _state.value
-        val catalog = s.catalog ?: return
-        val xmltv = s.xmltv ?: return
-        scope.launch {
-            val index = EpgIndex.build(guideScope(catalog), xmltv, store.prefs.value.epgOverrides).withExtra(onDemand)
-            _state.update { it.copy(guide = index) }
+    /** Downloads the guide straight into a new database, then swaps it in. */
+    private fun buildGuide(source: Source, catalog: Catalog) {
+        val db = guideDb ?: return
+        val channels = visibleChannels(catalog)
+        _state.update { it.copy(guideLoading = true, guideProgress = 0, guideError = null) }
+        val builder = try { db.builder() } catch (e: Exception) {
+            DiagLog.log("Couldn't create guide database", e)
+            _state.update { it.copy(guideLoading = false, guideError = "Not enough storage on this device to save the guide.") }
+            return
         }
-    }
-
-    private suspend fun loadGuide(l: SourceLoader, catalog: Catalog) {
-        _state.update { it.copy(guideLoading = true) }
         try {
-            val prefs = store.prefs.value
-            val scope = guideScope(catalog)
-            val maxCatchup = scope.maxOfOrNull { it.catchupDays } ?: 0
-            val mine = myChannelKeys().mapNotNull { k -> scope.firstOrNull { it.key == k } }
-            val result = l.loadGuide(
+            val maxCatchup = channels.maxOfOrNull { it.catchupDays } ?: 0
+            val t0 = System.currentTimeMillis()
+            val result = SourceLoader(source, net).streamGuide(
                 catalog = catalog,
                 nowMs = System.currentTimeMillis(),
                 daysBack = maxCatchup.coerceIn(0, 3),
-                daysAhead = 2,
-                overrides = prefs.epgOverrides,
-                shortEpgFor = (mine + scope).distinct().take(60),
-                guideChannels = scope,
-            )
-            _state.update { it.copy(guide = result.index.withExtra(onDemand), xmltv = result.xmltv, guideError = result.error) }
-            DiagLog.log("Guide: ${result.xmltv.programCount} programmes for ${scope.size} of ${catalog.channels.size} channels" +
-                (result.error?.let { " (error: $it)" } ?: ""))
-        } catch (e: OutOfMemoryError) {
-            DiagLog.log("Guide too large for this device's memory")
-            _state.update { it.copy(guideError = "The guide file is too large for this device. Hide categories you don't watch, then refresh.") }
+                daysAhead = GUIDE_DAYS_AHEAD,
+                guideChannels = channels,
+                overrides = store.prefs.value.epgOverrides,
+            ) { p ->
+                builder.add(p)
+                if (builder.count % 20_000 == 0) _state.update { it.copy(guideProgress = builder.count) }
+            }
+            if (builder.count == 0) {
+                builder.abort()
+                DiagLog.log("Guide download gave no listings" + (result.error?.let { ": $it" } ?: ""))
+                _state.update { it.copy(guideError = result.error ?: "Your provider's guide had no listings for these channels.") }
+                return
+            }
+            val ps = builder.finish(result.channels) ?: run {
+                _state.update { it.copy(guideError = "Couldn't save the guide.") }; return
+            }
+            programStore = ps
+            applyGuide(catalog, ps)
+            DiagLog.log("Guide saved: ${builder.count} listings, ${ps.idsWithData().size} guide channels, " +
+                "${(System.currentTimeMillis() - t0) / 1000}s" + (result.error?.let { " (stopped early: $it)" } ?: ""))
+            if (result.error != null) _state.update { it.copy(guideError = "The guide download was cut short; some listings may be missing.") }
         } catch (e: Exception) {
+            builder.abort()
             DiagLog.log("Guide failed", e)
             _state.update { it.copy(guideError = friendly(e)) }
         } finally {
@@ -157,34 +196,27 @@ class Repository(private val context: Context, val store: Store) {
         }
     }
 
-    /** Favorites, custom lists and recently watched: always get full guide data. */
-    private fun myChannelKeys(): List<String> {
-        val p = store.prefs.value
-        return (p.allLists.flatMap { it.keys } + p.recent + p.mostWatched().map { it.first }).distinct()
+    private fun applyGuide(catalog: Catalog, ps: ProgramStore) {
+        val g = StoreGuide.build(visibleChannels(catalog), ps, store.prefs.value.epgOverrides)
+        _state.update { it.copy(guide = g.withExtra(onDemand), epgChannels = ps.epgChannels()) }
     }
 
-    /**
-     * Channels whose full guide is kept in memory. Big providers (thousands of
-     * channels) get your channels plus the first [GUIDE_LIMIT] in provider order;
-     * the rest load now/next on demand as you scroll to them ([ensureGuide]).
-     */
-    fun guideScope(catalog: Catalog): List<Channel> {
-        val visible = visibleChannels(catalog)
-        if (visible.size <= GUIDE_LIMIT) return visible
-        val byKey = visible.associateBy { it.key }
-        val mine = myChannelKeys().mapNotNull { byKey[it] }
-        return (mine + visible).distinct().take(GUIDE_LIMIT + mine.size)
+    /** Re-matches the guide after the user fixes a channel's guide match or shows a hidden category (no download). */
+    fun rebuildGuideMatches() {
+        val catalog = _state.value.catalog ?: return
+        val ps = programStore ?: return
+        scope.launch { applyGuide(catalog, ps) }
     }
 
-    private val onDemand = java.util.concurrent.ConcurrentHashMap<String, List<lumen.core.Program>>()
-    private val asked = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    private val onDemand = ConcurrentHashMap<String, List<Program>>()
+    private val asked: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
 
-    /** Fetches now/next for channels on screen that have no guide yet. */
+    /** Fetches now/next for channels on screen that the guide file has nothing for. */
     fun ensureGuide(channels: List<Channel>) {
         val l = loader ?: return
         if (l.xtream == null) return
-        val idx = _state.value.guide
-        val need = channels.filter { !idx.hasGuide(it.key) && asked.add(it.key) }.take(20)
+        val g = _state.value.guide
+        val need = channels.filter { !g.hasGuide(it.key) && asked.add(it.key) }.take(20)
         if (need.isEmpty()) return
         scope.launch {
             val got = l.shortEpg(need)
@@ -216,6 +248,8 @@ class Repository(private val context: Context, val store: Store) {
         val s = _state.value.source ?: return
         loadJob?.cancel(); periodicJob?.cancel()
         CachingFetcher(cacheDir(s), net, true).clear()
+        guideDb?.delete()
+        sp.edit().remove("last_${s.id}").apply()
         store.removeSource(s.id)
         LogScrubber.clear()
         loader = null
@@ -229,8 +263,8 @@ class Repository(private val context: Context, val store: Store) {
     companion object {
         const val USER_AGENT = "LumenTV/1.0 (Linux; Android) ExoPlayer"
         private const val STALE_MS = 12 * 3_600_000L
-        private const val GUIDE_REFRESH_MS = 6 * 3_600_000L
-        private const val GUIDE_LIMIT = 2500
+        private const val AUTO_REFRESH_MS = 6 * 3_600_000L
+        private const val GUIDE_DAYS_AHEAD = 3
 
         fun friendly(e: Throwable): String = when (e) {
             is AuthException -> e.message ?: "Login failed."

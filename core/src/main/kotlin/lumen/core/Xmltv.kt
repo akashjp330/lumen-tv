@@ -34,20 +34,22 @@ object XmltvParser {
         nowMs: Long? = null,
         pastIds: Set<String>? = null,
         acceptPast: ((EpgChannel) -> Boolean)? = null,
+        /** When set, programmes are handed here (e.g. written to a database) instead of kept in memory. */
+        onProgram: ((Program) -> Unit)? = null,
     ): XmltvData {
         val factory = SAXParserFactory.newInstance()
         factory.isNamespaceAware = false
         trySet(factory, "http://xml.org/sax/features/external-general-entities", false)
         trySet(factory, "http://xml.org/sax/features/external-parameter-entities", false)
         trySet(factory, "http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
-        val handler = Handler(fromMs, toMs, keepChannelIds, acceptChannel, nowMs, pastIds, acceptPast)
+        val handler = Handler(fromMs, toMs, keepChannelIds, acceptChannel, nowMs, pastIds, acceptPast, onProgram)
         val parser = factory.newSAXParser()
         val source = InputSource(input)
         try {
             parser.parse(source, handler)
         } catch (e: org.xml.sax.SAXParseException) {
             // Truncated downloads are common; keep what was parsed so far if it's useful.
-            if (handler.programs.isEmpty()) throw e
+            if (handler.programs.isEmpty() && handler.streamed == 0) throw e
         }
         val sorted = handler.programs.mapValues { (_, l) -> l.sortedBy { it.startMs } }
         return XmltvData(handler.channels, sorted)
@@ -65,7 +67,9 @@ object XmltvParser {
         val nowMs: Long?,
         val pastIds: Set<String>?,
         val acceptPast: ((EpgChannel) -> Boolean)?,
+        val onProgram: ((Program) -> Unit)?,
     ) : DefaultHandler() {
+        var streamed = 0
         private val pastAccepted = HashSet<String>()
         private fun pastWanted(id: String) = nowMs == null || pastIds?.contains(id) == true || id in pastAccepted
         val channels = ArrayList<EpgChannel>()
@@ -140,9 +144,9 @@ object XmltvParser {
                 "programme" -> {
                     val c = pChannel
                     if (c != null) {
-                        programs.getOrPut(c) { ArrayList() }.add(
-                            Program(c, pStart, pStop, pTitle ?: "", pDesc?.takeIf { it.isNotEmpty() }, pCat)
-                        )
+                        val p = Program(c, pStart, pStop, pTitle ?: "", pDesc?.takeIf { it.isNotEmpty() }, pCat)
+                        val sink = onProgram
+                        if (sink != null) { sink(p); streamed++ } else programs.getOrPut(c) { ArrayList() }.add(p)
                     }
                     inProg = false; pChannel = null
                 }

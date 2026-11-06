@@ -194,6 +194,34 @@ class CoreTest {
         assertEquals(2, g.xmltv.channels.size)
     }
 
+    @Test fun databaseStyleGuideMatchesInMemoryGuide() = FakeXtreamServer(nowSec).use { srv ->
+        val loader = SourceLoader(Source.Xtream("s", "Test", srv.base, srv.user, srv.pass))
+        val cat = loader.loadCatalog(includeVod = false)
+        // Stream every programme to a "database" (here a list), as the app does with SQLite.
+        val rows = ArrayList<Program>()
+        val res = loader.streamGuide(cat, nowMs, daysBack = 2, daysAhead = 1, guideChannels = cat.channels) { rows.add(it) }
+        assertNull(res.error)
+        assertEquals(2, res.channels.size)
+        val store = MemoryProgramStore(XmltvData(res.channels, rows.groupBy { it.channelId }.mapValues { (_, l) -> l.sortedBy { it.startMs } }))
+        val g = StoreGuide.build(cat.channels, store)
+        assertEquals("Evening Report & Weather", g.at("101", nowMs)?.title)
+        assertEquals("Late Edition", g.next("101", nowMs)?.title)
+        assertEquals("Sunday Night Football", g.at("204", nowMs)?.title) // name-matched ("US: Sports One FHD")
+        assertFalse(g.hasGuide("999"))
+        assertEquals(listOf("Earlier News", "Evening Report & Weather", "Late Edition"),
+            g.window("101", nowMs - 3_600_000, nowMs + 3 * 3_600_000).map { it.title })
+        assertEquals("101", g.search("weather", nowMs).single().first)
+        // Past listings dropped on a channel without catch-up, kept on one with it.
+        assertTrue(rows.none { it.channelId == "sportsone.us" && it.stopMs <= nowMs })
+        assertTrue(rows.any { it.channelId == "metro.us" && it.stopMs <= nowMs })
+        // On-demand now/next layered over the stored guide.
+        val layered = g.withExtra(mapOf("999" to listOf(Program("x", nowMs - 1000, nowMs + 1000, "Pop-up"))))
+        assertEquals("Pop-up", layered.at("999", nowMs)?.title)
+        assertEquals("Evening Report & Weather", layered.at("101", nowMs)?.title)
+        // Manual guide fix wins.
+        assertEquals("Sunday Night Football", StoreGuide.build(cat.channels, store, mapOf("101" to "SportsOne.us")).at("101", nowMs)?.title)
+    }
+
     @Test fun nameNormalization() {
         assertEquals("espn", EpgMatcher.normalize("US: ESPN HD (East)"))
         assertEquals("sportsone", EpgMatcher.normalize("|US| Sports One FHD"))

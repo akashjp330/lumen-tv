@@ -114,12 +114,7 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
                 Text("Live guide", style = T.h1)
                 Text("${fmtDay(now)} · ${fmtClock(now)}", style = T.meta)
             }
-            if (repo.guideLoading) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    CircularProgressIndicator(color = LocalAccent.current, modifier = Modifier.width(14.dp).height(14.dp), strokeWidth = 2.dp)
-                    Text("Updating guide", style = T.meta)
-                }
-            }
+            RefreshButton(vm, repo)
         }
         Spacer(Modifier.height(8.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -220,7 +215,7 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
     }
 }
 
-private fun lumen.core.EpgIndex.hasAnyGuide(rows: List<Channel>) = rows.any { hasGuide(it.key) }
+private fun lumen.core.Guide.hasAnyGuide(rows: List<Channel>) = rows.any { hasGuide(it.key) }
 
 @Composable
 private fun GuideRow(

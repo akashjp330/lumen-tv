@@ -99,7 +99,7 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                PillButton(if (repo.refreshing) "Refreshing…" else "Refresh channels & guide",
+                PillButton(if (repo.refreshing || repo.guideLoading) "Refreshing…" else "Refresh channels & guide",
                     onClick = { vm.repo.refresh(); vm.showBanner("Refreshing in the background") },
                     modifier = Modifier.focusRequester(first))
                 PillButton("Add another provider", onClick = { vm.go(Route.AddSource) })
@@ -229,7 +229,9 @@ fun ManageCategoriesScreen(vm: MainViewModel, repo: RepoState) {
     val first = remember { FocusRequester() }
     Column(Modifier.fillMaxSize().padding(start = 32.dp, top = 24.dp, end = 32.dp)) {
         Text("Categories", style = T.h1)
+        androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.repo.rebuildGuideMatches() } }
         Text("Hidden categories disappear everywhere and skip guide downloads, which keeps big providers fast. " +
+            "Categories you show again get their guide on the next refresh. " +
             "Locked categories need the PIN" + if (settings.pinHash == null) " (set one in Settings first)." else ".", style = T.body)
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

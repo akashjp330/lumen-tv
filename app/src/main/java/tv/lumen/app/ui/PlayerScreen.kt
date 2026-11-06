@@ -327,7 +327,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
 
         when (dialog) {
             PlayerDialog.TRACKS -> TracksDialog(player) { dialog = null }
-            PlayerDialog.FIX_GUIDE -> channel?.let { ch -> FixGuideDialog(vm, ch, repo.xmltv) { dialog = null } }
+            PlayerDialog.FIX_GUIDE -> channel?.let { ch -> FixGuideDialog(vm, ch, repo.epgChannels) { dialog = null } }
             null -> Unit
         }
     }
@@ -433,9 +433,9 @@ private fun TrackRow(o: TrackOption, modifier: Modifier, onClose: () -> Unit) {
 }
 
 @Composable
-private fun FixGuideDialog(vm: MainViewModel, ch: Channel, xmltv: lumen.core.XmltvData?, onClose: () -> Unit) {
+private fun FixGuideDialog(vm: MainViewModel, ch: Channel, epgChannels: List<lumen.core.EpgChannel>, onClose: () -> Unit) {
     var query by remember { mutableStateOf(EpgMatcher.normalize(ch.name).take(12)) }
-    val matcher = remember(xmltv) { xmltv?.let { EpgMatcher(it) } }
+    val matcher = remember(epgChannels) { epgChannels.takeIf { it.isNotEmpty() }?.let { EpgMatcher(it, emptySet()) } }
     val candidates = remember(query, matcher) { matcher?.candidates(query).orEmpty() }
     val fieldFr = remember { FocusRequester() }
     DialogFrame("Match ${ch.name} to a guide channel") {

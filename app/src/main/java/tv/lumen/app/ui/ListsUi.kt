@@ -240,3 +240,41 @@ fun CategoryPicker(
     }
     LaunchedEffect(Unit) { delay(60); runCatching { first.requestFocus() } }
 }
+
+fun fmtAgo(ms: Long, now: Long): String {
+    if (ms <= 0) return "Not updated yet"
+    val min = (now - ms) / 60_000
+    return when {
+        min < 2 -> "Updated just now"
+        min < 60 -> "Updated $min min ago"
+        min < 24 * 60 -> "Updated ${min / 60}h ago"
+        else -> "Updated ${min / (24 * 60)}d ago"
+    }
+}
+
+/**
+ * One-click refresh: re-downloads channels, movies, series and the guide, picking
+ * up new channels and changed stream links. Shows progress while it runs.
+ */
+@Composable
+fun RefreshButton(vm: MainViewModel, repo: RepoState, modifier: Modifier = Modifier) {
+    val now by rememberNow(30_000)
+    val busy = repo.refreshing || repo.guideLoading
+    val label = when {
+        repo.refreshing && !repo.guideLoading -> "Refreshing channels…"
+        repo.guideLoading -> if (repo.guideProgress > 0) "Updating guide · ${"%,d".format(repo.guideProgress)}" else "Updating guide…"
+        else -> "⟳  Refresh"
+    }
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (busy) androidx.compose.material3.CircularProgressIndicator(
+            color = LocalAccent.current, modifier = Modifier.size(14.dp), strokeWidth = 2.dp,
+        )
+        Column(horizontalAlignment = Alignment.End) {
+            PillButton(label, onClick = {
+                if (busy) vm.showBanner("Already refreshing — the old guide stays usable until the new one is ready")
+                else { vm.repo.refresh(); vm.showBanner("Refreshing channels, movies, series and guide") }
+            })
+            Text(fmtAgo(repo.lastRefreshMs, now), style = T.meta.copy(color = C.Faint), modifier = Modifier.padding(top = 2.dp, end = 6.dp))
+        }
+    }
+}

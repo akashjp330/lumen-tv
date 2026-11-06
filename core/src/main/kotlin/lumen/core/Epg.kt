@@ -1,31 +1,54 @@
 package lumen.core
 
-/**
- * Guide data keyed by app channel key, after matching provider channels to
- * XMLTV channel ids.
- */
-class EpgIndex(val byChannelKey: Map<String, List<Program>>) {
+/** What the UI asks of the guide, whether it lives in memory or in a database. */
+interface Guide {
+    fun hasGuide(channelKey: String): Boolean
+    fun at(channelKey: String, timeMs: Long): Program?
+    fun next(channelKey: String, timeMs: Long): Program?
+    /** Programmes overlapping [fromMs, toMs). */
+    fun window(channelKey: String, fromMs: Long, toMs: Long): List<Program>
+    /** Case-insensitive title search, soonest first, returning (channel key, programme). */
+    fun search(query: String, nowMs: Long, limit: Int = 60): List<Pair<String, Program>>
 
-    /** Adds per-channel listings (e.g. fetched on demand) for channels that have none yet. */
-    fun withExtra(extra: Map<String, List<Program>>): EpgIndex {
+    /** Adds per-channel listings (e.g. fetched on demand) for channels that have none. */
+    fun withExtra(extra: Map<String, List<Program>>): Guide =
+        if (extra.isEmpty()) this else LayeredGuide(this, EpgIndex(extra.mapValues { (_, v) -> v.sortedBy { it.startMs } }))
+}
+
+/** [extra] answers for channels [base] has nothing for. */
+class LayeredGuide(private val base: Guide, private val extra: EpgIndex) : Guide {
+    private fun pick(k: String): Guide = if (base.hasGuide(k)) base else extra
+    override fun hasGuide(channelKey: String) = base.hasGuide(channelKey) || extra.hasGuide(channelKey)
+    override fun at(channelKey: String, timeMs: Long) = pick(channelKey).at(channelKey, timeMs)
+    override fun next(channelKey: String, timeMs: Long) = pick(channelKey).next(channelKey, timeMs)
+    override fun window(channelKey: String, fromMs: Long, toMs: Long) = pick(channelKey).window(channelKey, fromMs, toMs)
+    override fun search(query: String, nowMs: Long, limit: Int) =
+        (base.search(query, nowMs, limit) + extra.search(query, nowMs, limit)).distinct().sortedBy { it.second.startMs }.take(limit)
+    override fun withExtra(extra: Map<String, List<Program>>): Guide {
         if (extra.isEmpty()) return this
-        val m = HashMap(byChannelKey)
-        for ((k, v) in extra) if (m[k].isNullOrEmpty() && v.isNotEmpty()) m[k] = v.sortedBy { it.startMs }
-        return EpgIndex(m)
+        val merged = HashMap(this.extra.byChannelKey)
+        for ((k, v) in extra) if (v.isNotEmpty()) merged[k] = v.sortedBy { it.startMs }
+        return LayeredGuide(base, EpgIndex(merged))
     }
+}
 
+/**
+ * Guide data in memory, keyed by app channel key, after matching provider
+ * channels to XMLTV channel ids.
+ */
+class EpgIndex(val byChannelKey: Map<String, List<Program>>) : Guide {
 
     fun programs(channelKey: String): List<Program> = byChannelKey[channelKey].orEmpty()
 
-    fun hasGuide(channelKey: String) = byChannelKey[channelKey]?.isNotEmpty() == true
+    override fun hasGuide(channelKey: String) = byChannelKey[channelKey]?.isNotEmpty() == true
 
-    fun at(channelKey: String, timeMs: Long): Program? {
+    override fun at(channelKey: String, timeMs: Long): Program? {
         val list = byChannelKey[channelKey] ?: return null
         val i = indexAtOrBefore(list, timeMs)
         return list.getOrNull(i)?.takeIf { it.isAiring(timeMs) }
     }
 
-    fun next(channelKey: String, timeMs: Long): Program? {
+    override fun next(channelKey: String, timeMs: Long): Program? {
         val list = byChannelKey[channelKey] ?: return null
         var i = indexAtOrBefore(list, timeMs) + 1
         if (i < 0) i = 0
@@ -33,8 +56,7 @@ class EpgIndex(val byChannelKey: Map<String, List<Program>>) {
         return list.getOrNull(i)
     }
 
-    /** Programmes overlapping [fromMs, toMs). */
-    fun window(channelKey: String, fromMs: Long, toMs: Long): List<Program> {
+    override fun window(channelKey: String, fromMs: Long, toMs: Long): List<Program> {
         val list = byChannelKey[channelKey] ?: return emptyList()
         val start = indexAtOrBefore(list, fromMs).coerceAtLeast(0)
         val out = ArrayList<Program>()
@@ -46,8 +68,7 @@ class EpgIndex(val byChannelKey: Map<String, List<Program>>) {
         return out
     }
 
-    /** Case-insensitive substring search over titles, soonest first. */
-    fun search(query: String, nowMs: Long, limit: Int = 60): List<Pair<String, Program>> {
+    override fun search(query: String, nowMs: Long, limit: Int): List<Pair<String, Program>> {
         val q = query.trim().lowercase()
         if (q.length < 2) return emptyList()
         val hits = ArrayList<Pair<String, Program>>()
@@ -94,14 +115,16 @@ class EpgIndex(val byChannelKey: Map<String, List<Program>>) {
     }
 }
 
-class EpgMatcher(private val xmltv: XmltvData) {
+class EpgMatcher(private val epgChannels: List<EpgChannel>, idsWithData: Set<String>) {
+    constructor(xmltv: XmltvData) : this(xmltv.channels, xmltv.programs.keys)
+
     private val ids: Set<String> = buildSet {
-        xmltv.channels.forEach { add(it.id.lowercase()) }
-        addAll(xmltv.programs.keys)
+        epgChannels.forEach { add(it.id.lowercase()) }
+        addAll(idsWithData)
     }
 
     private val byName: Map<String, String> = buildMap {
-        for (c in xmltv.channels) for (n in c.names + c.id) {
+        for (c in epgChannels) for (n in c.names + c.id) {
             val key = normalize(n)
             if (key.isNotEmpty() && key !in this) put(key, c.id.lowercase())
         }
@@ -119,8 +142,8 @@ class EpgMatcher(private val xmltv: XmltvData) {
     /** Candidate XMLTV channels for the manual "fix guide match" picker. */
     fun candidates(query: String, limit: Int = 30): List<EpgChannel> {
         val q = normalize(query)
-        if (q.isEmpty()) return xmltv.channels.take(limit)
-        return xmltv.channels
+        if (q.isEmpty()) return epgChannels.take(limit)
+        return epgChannels
             .filter { c -> (c.names + c.id).any { normalize(it).contains(q) } }
             .take(limit)
     }

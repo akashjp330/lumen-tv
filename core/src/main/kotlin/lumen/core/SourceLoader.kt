@@ -125,6 +125,44 @@ class SourceLoader(
         return GuideResult(index, xmltv, error)
     }
 
+    /**
+     * Streams the guide into [sink] (a database writer) instead of memory, for
+     * every channel in [guideChannels]. Returns the guide's channel list.
+     */
+    fun streamGuide(
+        catalog: Catalog,
+        nowMs: Long,
+        daysBack: Int,
+        daysAhead: Int,
+        guideChannels: List<Channel>,
+        overrides: Map<String, String> = emptyMap(),
+        sink: (Program) -> Unit,
+    ): StreamedGuide {
+        val url = catalog.epgUrl ?: return StreamedGuide(emptyList(), "This provider didn't give a guide link.")
+        val from = nowMs - daysBack * 86_400_000L
+        val to = nowMs + daysAhead * 86_400_000L
+        val ids = HashSet<String>().apply {
+            guideChannels.forEach { c -> c.epgId?.let { add(it.lowercase()) } }
+            overrides.values.forEach { add(it.lowercase()) }
+        }
+        val names = guideChannels.mapTo(HashSet()) { EpgMatcher.normalize(it.name) }.apply { remove("") }
+        val accept: (EpgChannel) -> Boolean = { c ->
+            c.id.lowercase() in ids || EpgMatcher.normalize(c.id) in names || c.names.any { EpgMatcher.normalize(it) in names }
+        }
+        val replay = guideChannels.filter { it.catchupDays > 0 }
+        val pastIds = replay.mapNotNullTo(HashSet()) { it.epgId?.lowercase() }
+        val pastNames = replay.mapTo(HashSet()) { EpgMatcher.normalize(it.name) }.apply { remove("") }
+        val acceptPast: (EpgChannel) -> Boolean = { c ->
+            pastNames.isNotEmpty() && (EpgMatcher.normalize(c.id) in pastNames || c.names.any { EpgMatcher.normalize(it) in pastNames })
+        }
+        return try {
+            val d = http.open(url).use { XmltvParser.parse(it, from, to, ids, accept, nowMs, pastIds, acceptPast, sink) }
+            StreamedGuide(d.channels, null)
+        } catch (e: Exception) {
+            StreamedGuide(emptyList(), LogScrubber.scrub(e.message ?: e.javaClass.simpleName))
+        }
+    }
+
     /** Now/next for channels outside the kept guide (Xtream only). */
     fun shortEpg(channels: List<Channel>): Map<String, List<Program>> {
         val x = xtream ?: return emptyMap()
@@ -143,3 +181,5 @@ class SourceLoader(
 }
 
 class GuideResult(val index: EpgIndex, val xmltv: XmltvData, val error: String?)
+
+class StreamedGuide(val channels: List<EpgChannel>, val error: String?)

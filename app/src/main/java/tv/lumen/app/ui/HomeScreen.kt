@@ -125,7 +125,10 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
     var restored by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
-        Hero(vm, hero, previewKey, now, guide.at(hero?.key ?: "", now), prefs.favorites)
+        Box {
+            Hero(vm, hero, previewKey, now, guide.at(hero?.key ?: "", now), prefs.favorites)
+            RefreshButton(vm, repo, Modifier.align(Alignment.TopEnd).padding(top = 16.dp, end = 24.dp))
+        }
         LazyColumn(
             Modifier.fillMaxWidth().weight(1f),
             contentPadding = PaddingValues(bottom = 24.dp),
@@ -163,7 +166,7 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
     }
 }
 
-private fun lumen.core.EpgIndex.hasAny(channels: List<Channel>) = channels.any { hasGuide(it.key) }
+private fun lumen.core.Guide.hasAny(channels: List<Channel>) = channels.any { hasGuide(it.key) }
 
 @Composable
 private fun Hero(
@@ -219,7 +222,7 @@ private fun Hero(
 private fun TileView(
     vm: MainViewModel,
     tile: Tile,
-    guide: lumen.core.EpgIndex,
+    guide: lumen.core.Guide,
     now: Long,
     modifier: Modifier,
     zap: List<String>,
