@@ -1,5 +1,8 @@
 package tv.lumen.app.ui
 
+import androidx.compose.foundation.border
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -55,7 +58,21 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
     val catalog = repo.catalog ?: return
     var query by remember { mutableStateOf(vm.focusMemory["search"] ?: "") }
     val fieldFr = remember { FocusRequester() }
+    val barFr = remember { FocusRequester() }
     val now = System.currentTimeMillis()
+    // The keyboard opens only while editing: on a fresh search, or when you click the search box.
+    var editing by remember { mutableStateOf(query.isBlank()) }
+    val restoreId = vm.focusMemory["searchItem"]
+    var restored by remember { mutableStateOf(query.isBlank()) }
+
+    /** Remembers the clicked result so Back from the player lands on it, not the keyboard. */
+    @Composable
+    fun Modifier.restorable(id: String): Modifier {
+        val fr = remember { FocusRequester() }
+        if (!restored && id == restoreId) LaunchedEffect(Unit) { delay(60); runCatching { fr.requestFocus() }; restored = true }
+        return this.focusRequester(fr)
+    }
+    fun pick(id: String, action: () -> Unit) { vm.focusMemory["searchItem"] = id; action() }
 
     val results by produceState(Results(), query, catalog, repo.guide) {
         delay(300)
@@ -77,15 +94,36 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
     Column(Modifier.fillMaxSize().padding(start = 32.dp, top = 24.dp, end = 24.dp)) {
         Text("Search", style = T.h1)
         Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = query, onValueChange = { query = it }, singleLine = true,
-            label = { Text("Channels, shows, movies, series") },
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = C.Text, unfocusedTextColor = C.Text,
-                focusedBorderColor = LocalAccent.current, unfocusedBorderColor = C.Line,
-            ),
-            modifier = Modifier.width(520.dp).focusRequester(fieldFr),
-        )
+        if (editing) {
+            OutlinedTextField(
+                value = query, onValueChange = { query = it }, singleLine = true,
+                label = { Text("Channels, shows, movies, series") },
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { editing = false }),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = C.Text, unfocusedTextColor = C.Text,
+                    focusedBorderColor = LocalAccent.current, unfocusedBorderColor = C.Line,
+                ),
+                modifier = Modifier.width(520.dp).focusRequester(fieldFr)
+                    .onFocusChanged { if (!it.isFocused && editing && query.isNotBlank()) editing = false },
+            )
+            LaunchedEffect(Unit) { delay(80); runCatching { fieldFr.requestFocus() } }
+        } else {
+            // Looks like the search box; OK opens the keyboard.
+            Focusable(
+                onClick = { editing = true },
+                modifier = Modifier.width(520.dp).height(56.dp).focusRequester(barFr),
+                shape = RoundedCornerShape(6.dp), color = C.Ink, focusedColor = C.Surface, scale = 1f,
+            ) { f ->
+                Row(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (query.isBlank()) "Channels, shows, movies, series" else query,
+                        style = T.body.copy(color = if (query.isBlank()) C.Muted else C.Text), modifier = Modifier.weight(1f))
+                    Text(if (f) "OK to type" else "", style = T.meta)
+                }
+                Box(Modifier.matchParentSize().border(1.dp, if (f) LocalAccent.current else C.Line, RoundedCornerShape(6.dp)))
+            }
+            if (restored) LaunchedEffect(Unit) { delay(80); runCatching { barFr.requestFocus() } }
+        }
         Spacer(Modifier.height(14.dp))
         if (query.trim().length >= 2 && results.isEmpty) Text("Nothing found for \"$query\"", style = T.body)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -95,8 +133,8 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
                         val p = repo.guide.at(ch.key, now)
                         Column(Modifier.width(170.dp)) {
                             Focusable(
-                                onClick = { vm.playChannel(ch, zapKeys = results.channels.map { it.key }) },
-                                modifier = Modifier.fillMaxWidth().height(95.dp),
+                                onClick = { pick("c:" + ch.key) { vm.playChannel(ch, zapKeys = results.channels.map { it.key }) } },
+                                modifier = Modifier.fillMaxWidth().height(95.dp).restorable("c:" + ch.key),
                                 onMenu = { vm.openChannelMenu(ch) },
                             ) {
                                 ChannelLogo(ch, Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 14.dp))
@@ -118,8 +156,8 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
                 Section("On TV") {
                     items(results.programs, key = { it.first.key + it.second.startMs }) { (ch, p) ->
                         Focusable(
-                            onClick = { if (p.startMs <= now) vm.playChannel(ch) else vm.toggleReminder(ch, p) },
-                            modifier = Modifier.width(220.dp).height(64.dp),
+                            onClick = { pick("p:" + ch.key + p.startMs) { if (p.startMs <= now) vm.playChannel(ch) else vm.toggleReminder(ch, p) } },
+                            modifier = Modifier.width(220.dp).height(64.dp).restorable("p:" + ch.key + p.startMs),
                         ) {
                             Column(Modifier.padding(10.dp)) {
                                 OneLine(p.title, T.title)
@@ -132,7 +170,7 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
             if (results.movies.isNotEmpty()) item {
                 Section("Movies") {
                     items(results.movies, key = { it.id }) { m ->
-                        Focusable(onClick = { vm.openMovie(m) }, modifier = Modifier.width(96.dp).height(142.dp)) {
+                        Focusable(onClick = { pick("m:" + m.id) { vm.openMovie(m) } }, modifier = Modifier.width(96.dp).height(142.dp).restorable("m:" + m.id)) {
                             Poster(m.poster, m.name, Modifier.fillMaxSize())
                         }
                     }
@@ -141,7 +179,7 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
             if (results.series.isNotEmpty()) item {
                 Section("Series") {
                     items(results.series, key = { it.id }) { s ->
-                        Focusable(onClick = { vm.openSeries(s) }, modifier = Modifier.width(96.dp).height(142.dp)) {
+                        Focusable(onClick = { pick("s:" + s.id) { vm.openSeries(s) } }, modifier = Modifier.width(96.dp).height(142.dp).restorable("s:" + s.id)) {
                             Poster(s.cover, s.name, Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)))
                         }
                     }
@@ -149,7 +187,6 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
             }
         }
     }
-    LaunchedEffect(Unit) { delay(80); runCatching { fieldFr.requestFocus() } }
 }
 
 @Composable
