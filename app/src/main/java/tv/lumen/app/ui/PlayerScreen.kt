@@ -70,7 +70,7 @@ import tv.lumen.app.player.LiveController
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 
-private enum class PlayerDialog { TRACKS, FIX_GUIDE, VERSIONS }
+private enum class PlayerDialog { TRACKS, FIX_GUIDE, VERSIONS, CHANNELS }
 
 @Composable
 fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
@@ -246,10 +246,16 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
         touch++
     }
 
+    /** The channels you're flipping through: the list you started from, else this channel's category. */
+    fun zapList(): List<Channel> {
+        val cur = channel ?: return emptyList()
+        val fromList = req.zapKeys?.mapNotNull { k -> visible.firstOrNull { it.key == k } }?.takeIf { it.size > 1 && cur in it }
+        return fromList ?: visible.filter { it.categoryId == cur.categoryId }.ifEmpty { visible }
+    }
+
     fun zap(delta: Int) {
         val cur = channel ?: return
-        val fromList = req.zapKeys?.mapNotNull { k -> visible.firstOrNull { it.key == k } }?.takeIf { it.size > 1 && cur in it }
-        val list = fromList ?: visible.filter { it.categoryId == cur.categoryId }.ifEmpty { visible }
+        val list = zapList()
         if (list.isEmpty()) return
         val i = list.indexOfFirst { it.key == cur.key }.coerceAtLeast(0)
         switchTo(list[(i + delta).mod(list.size)])
@@ -316,8 +322,9 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
         if (!down) return code != AndroidKeyEvent.KEYCODE_BACK
         if (req.isLive) {
             when (code) {
-                AndroidKeyEvent.KEYCODE_DPAD_UP -> zap(+1)
-                AndroidKeyEvent.KEYCODE_DPAD_DOWN -> zap(-1)
+                // ▲ opens the channel list to pick from; ▼ / OK show info and controls (no channel change).
+                AndroidKeyEvent.KEYCODE_DPAD_UP -> dialog = PlayerDialog.CHANNELS
+                AndroidKeyEvent.KEYCODE_DPAD_DOWN -> overlay = true
                 AndroidKeyEvent.KEYCODE_DPAD_LEFT -> channelOf(previousKey)?.let { switchTo(it) } ?: vm.showBanner("No previous channel yet")
                 AndroidKeyEvent.KEYCODE_MENU -> channel?.let { vm.openChannelMenu(it) }
                 AndroidKeyEvent.KEYCODE_BACK -> return false
@@ -432,7 +439,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    if (req.isLive) "▲ ▼ change channel" + (if (req.zapKeys != null) " in this list" else "") +
+                    if (req.isLive) "▲ channel list" + (if (req.zapKeys != null) " (this list)" else "") +
                         "  ·  ◀ previous channel  ·  0–9 channel number" +
                         (if (live.usingBuffer) "  ·  ⏪ ⏩ 30 s" else "") + "  ·  ≡ lists  ·  Back hides this"
                     else "◀ back 10 s  ·  ▶ ahead 30 s  ·  OK pause  ·  Back hides this",
@@ -444,6 +451,9 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
         when (dialog) {
             PlayerDialog.TRACKS -> TracksDialog(player) { dialog = null }
             PlayerDialog.FIX_GUIDE -> channel?.let { ch -> FixGuideDialog(vm, ch, repo.epgChannels) { dialog = null } }
+            PlayerDialog.CHANNELS -> ChannelListPanel(zapList(), channel, now, repo.guide,
+                title = if (req.zapKeys != null) "This list" else (channel?.let { c -> repo.catalog?.liveCategories?.firstOrNull { it.id == c.categoryId }?.name?.let(::displayCategory) } ?: "Channels"),
+                onPick = { dialog = null; switchTo(it) }) { dialog = null }
             PlayerDialog.VERSIONS -> VersionsDialog(versions, now, repo.guide, onPick = { dialog = null; switchTo(it) }) { dialog = null }
             null -> Unit
         }
@@ -656,4 +666,51 @@ private fun StreamInfo(player: androidx.media3.exoplayer.ExoPlayer, live: LiveCo
         lines.forEach { Text(it, style = T.meta.copy(color = C.Text2)) }
         if (tick < 0) Text("") // re-read every second
     }
+}
+
+
+/** Side panel of channels (your list or the category) with what's on; OK switches. */
+@Composable
+private fun ChannelListPanel(
+    channels: List<Channel>,
+    current: Channel?,
+    now: Long,
+    guide: lumen.core.Guide,
+    title: String,
+    onPick: (Channel) -> Unit,
+    onClose: () -> Unit,
+) {
+    val start = channels.indexOfFirst { it.key == current?.key }.coerceAtLeast(0)
+    val state = androidx.compose.foundation.lazy.rememberLazyListState(initialFirstVisibleItemIndex = (start - 3).coerceAtLeast(0))
+    val fr = remember { FocusRequester() }
+    Box(Modifier.fillMaxSize().background(Color(0x99000000)), contentAlignment = Alignment.CenterStart) {
+        Column(Modifier.width(380.dp).fillMaxSize().background(C.Surface.copy(alpha = 0.97f)).padding(16.dp)) {
+            Text(title, style = T.h2)
+            Text("OK to watch · Back to close", style = T.meta)
+            Spacer(Modifier.height(8.dp))
+            LazyColumn(state = state, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                items(channels.size) { i ->
+                    val ch = channels[i]
+                    val p = guide.at(ch.key, now)
+                    val isCurrent = ch.key == current?.key
+                    Focusable(
+                        onClick = { if (isCurrent) onClose() else onPick(ch) },
+                        modifier = (if (i == start) Modifier.focusRequester(fr) else Modifier).fillMaxWidth().height(52.dp),
+                        color = if (isCurrent) C.Raised else C.Surface2, focusedColor = C.Text, scale = 1.02f, ring = false,
+                    ) { f ->
+                        Row(Modifier.fillMaxSize().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ChannelLogo(ch, Modifier.size(52.dp, 34.dp).clip(RoundedCornerShape(6.dp)).background(C.Ink), monogramSize = 24.dp)
+                            Column(Modifier.weight(1f)) {
+                                OneLine("${ch.number}  ${ch.name}" + if (isCurrent) "  · watching" else "", T.title.copy(color = if (f) C.Ink else C.Text))
+                                OneLine(p?.let { "${it.title} · ${fmtLeft(it, now)}" } ?: "", T.meta.copy(color = if (f) C.Ink else C.Muted))
+                            }
+                            QualityBadge(ch.name)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    LaunchedEffect(Unit) { delay(50); runCatching { fr.requestFocus() } }
 }
