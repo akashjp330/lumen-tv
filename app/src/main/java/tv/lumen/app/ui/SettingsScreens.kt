@@ -213,7 +213,7 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
                 PillButton("Diagnostics log", onClick = { vm.go(Route.Diagnostics) })
             }
         }
-        item { Text("Lumen TV ${BuildInfo.version(app)}", style = T.meta) }
+        item { Text("KASH TV ${BuildInfo.version(app)}", style = T.meta) }
     }
     LaunchedEffect(Unit) { delay(80); runCatching { first.requestFocus() } }
 }

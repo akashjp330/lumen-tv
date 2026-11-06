@@ -1,4 +1,4 @@
-# Lumen TV
+# KASH TV
 
 A good-looking IPTV player for Fire TV and Android TV. It works with Xtream Codes logins (server, username, password) and with M3U playlist links plus an XMLTV guide.
 
@@ -29,7 +29,7 @@ You do this once. After that, updates take two minutes.
 1. Open Downloader and type the code **9667181**.
    (Or the full address: `https://github.com/akashjp330/lumen-tv/releases/latest/download/LumenTV.apk`)
 2. Choose **Install**. When it finishes, **Delete** the downloaded file to save space.
-3. Lumen TV appears in **Your Apps & Channels**. Hold the Home button and pick **Apps** if you want to move it to the front.
+3. KASH TV appears in **Your Apps & Channels**. Hold the Home button and pick **Apps** if you want to move it to the front.
 
 ### Updating
 

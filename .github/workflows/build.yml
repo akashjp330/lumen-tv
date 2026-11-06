@@ -36,7 +36,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: Lumen TV 1.0.${{ github.run_number }}
+          name: KASH TV 1.0.${{ github.run_number }}
           make_latest: true
           files: LumenTV.apk
           body: |
