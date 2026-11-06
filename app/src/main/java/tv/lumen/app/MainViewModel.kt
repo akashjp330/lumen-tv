@@ -10,7 +10,9 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import lumen.core.Catalog
 import lumen.core.Channel
+import lumen.core.Source
 import lumen.core.ContentType
 import lumen.core.Episode
 import lumen.core.Movie
@@ -248,7 +250,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Sign-in typed on a phone (called from the phone page's thread). */
     fun loginFromPhone(server: String, user: String, pass: String): String {
         if (server.isBlank() || user.isBlank() || pass.isBlank()) return "Fill in the server, username and password."
-        val source = lumen.core.Source.Xtream(java.util.UUID.randomUUID().toString().take(8), "My IPTV", server.trim(), user.trim(), pass)
+        val source = Source.Xtream(java.util.UUID.randomUUID().toString().take(8), "My IPTV", server.trim(), user.trim(), pass)
         return try {
             val acct = kotlinx.coroutines.runBlocking { repo.verify(source) }
             if (acct != null && !acct.isActive) "The login worked, but the account status is \"${acct.status}\"."
@@ -277,7 +279,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var startedLastChannel = false
 
     /** "Open straight into the last channel": once per app launch. */
-    fun maybeStartLastChannel(catalog: lumen.core.Catalog) {
+    fun maybeStartLastChannel(catalog: Catalog) {
         if (startedLastChannel) return
         startedLastChannel = true
         if (!store.settings.value.startOnLastChannel || current != Route.Home || stack.size > 1) return
