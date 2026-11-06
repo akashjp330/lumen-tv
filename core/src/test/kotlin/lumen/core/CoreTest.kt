@@ -213,6 +213,7 @@ class CoreTest {
         assertEquals(fresh, cached)
         assertEquals("served from disk", before, srv.requests.size)
         dir.deleteRecursively()
+        Unit // JUnit test methods must return void
     }
 
     // ---------- misc ----------
