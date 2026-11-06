@@ -87,13 +87,18 @@ class LiveBuffer(val url: String, private val dir: File, private val maxBytes: L
                 if (closed) break
                 failuresInARow++
                 reconnects++
-                DiagLog.log("Live buffer: connection dropped (${e.javaClass.simpleName}); reconnecting (try $failuresInARow)")
-                if (failuresInARow >= 8 && written == 0L) {
+                val refused = e is lumen.core.HttpException
+                DiagLog.log("Live buffer: connection dropped (${if (refused) "HTTP ${(e as lumen.core.HttpException).code}" else e.javaClass.simpleName}); try $failuresInARow")
+                // Providers block devices that reconnect too often, so back off hard and give up early.
+                // A refusal (e.g. connection limit reached) or 5 failures in a row ends this buffer;
+                // the player then falls back to playing the channel directly.
+                if (refused || failuresInARow >= 5 || (written == 0L && failuresInARow >= 3)) {
                     failure = e.message ?: "Couldn't open the channel"
                     synchronized(lock) { lock.notifyAll() }
                     break
                 }
-                try { Thread.sleep((500L * failuresInARow).coerceAtMost(4_000)) } catch (_: InterruptedException) { break }
+                val wait = (2_000L shl (failuresInARow - 1)).coerceAtMost(20_000) // 2, 4, 8, 16 s
+                try { Thread.sleep(wait) } catch (_: InterruptedException) { break }
             }
         }
     }

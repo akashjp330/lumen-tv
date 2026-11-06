@@ -52,6 +52,7 @@ class LiveController(context: Context, private val player: ExoPlayer) {
     private var frozenSince = 0L
     /** The watchdog only runs once the picture has started; slow channel starts aren't freezes. */
     private var started = false
+    private var lastRestartAt = 0L
 
     val usingBuffer get() = buffer != null
 
@@ -149,6 +150,9 @@ class LiveController(context: Context, private val player: ExoPlayer) {
         if (frozenSince == 0L) { frozenSince = now; return false }
         if (now - frozenSince < FREEZE_MS) return false
         frozenSince = 0
+        // Never restart more than once every 30 s (each restart is a new connection to the provider).
+        if (now - lastRestartAt < 30_000) return false
+        lastRestartAt = now
         stalls++
         DiagLog.log("Picture frozen ${FREEZE_MS / 1000}s; restarting stream (${if (usingBuffer) "buffered" else format})")
         val b = buffer

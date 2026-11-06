@@ -154,12 +154,12 @@ private class Reconnector(private val player: ExoPlayer) : Player.Listener {
             player.prepare()
             return
         }
-        if (attempts >= 6) {
+        if (attempts >= 4) {
             DiagLog.log("Playback failed after retries: ${error.errorCodeName}", error)
             return
         }
         attempts++
-        val wait = 1_000L * attempts
+        val wait = 2_000L * attempts * attempts // 2, 8, 18, 32 s: gentle on the provider
         DiagLog.log("Stream error ${error.errorCodeName}; reconnecting in ${wait}ms (try $attempts)")
         handler.postDelayed({
             if (player.mediaItemCount > 0) {

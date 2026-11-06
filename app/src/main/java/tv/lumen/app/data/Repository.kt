@@ -211,12 +211,22 @@ class Repository(private val context: Context, val store: Store) {
     private val onDemand = ConcurrentHashMap<String, List<Program>>()
     private val asked: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
 
-    /** Fetches now/next for channels on screen that the guide file has nothing for. */
+    private var askWindowStart = 0L
+    private var askedInWindow = 0
+
+    /** Fetches now/next for channels on screen that the guide file has nothing for (at most 30 a minute). */
     fun ensureGuide(channels: List<Channel>) {
         val l = loader ?: return
         if (l.xtream == null) return
+        val now = System.currentTimeMillis()
+        synchronized(this) {
+            if (now - askWindowStart > 60_000) { askWindowStart = now; askedInWindow = 0 }
+            if (askedInWindow >= 30) return
+        }
         val g = _state.value.guide
-        val need = channels.filter { !g.hasGuide(it.key) && asked.add(it.key) }.take(20)
+        val need = channels.filter { !g.hasGuide(it.key) && it.key !in asked }.take(minOf(10, 30 - askedInWindow))
+        need.forEach { asked.add(it.key) }
+        synchronized(this) { askedInWindow += need.size }
         if (need.isEmpty()) return
         scope.launch {
             val got = l.shortEpg(need)
@@ -269,7 +279,8 @@ class Repository(private val context: Context, val store: Store) {
         fun friendly(e: Throwable): String = when (e) {
             is AuthException -> e.message ?: "Login failed."
             is java.net.UnknownHostException -> "Can't find that server. Check the address and your internet connection."
-            is java.net.SocketTimeoutException -> "The server took too long to answer. Try again in a minute."
+            is java.net.SocketTimeoutException -> "The server took too long to answer. If your provider's own app can't connect right now either, " +
+                "the provider may be briefly blocking this device after too many connections; that usually clears within an hour."
             is java.net.ConnectException -> "Couldn't connect to the server. Check the address and port."
             is lumen.core.HttpException -> "The server answered with an error (${e.code})."
             is IOException -> "Network problem: ${LogScrubber.scrub(e.message ?: "unknown")}"
