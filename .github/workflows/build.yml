@@ -1,0 +1,44 @@
+name: Build app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Test core logic
+        run: ./gradlew :core:test --no-daemon
+
+      - name: Build the app
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Rename
+        run: cp app/build/outputs/apk/release/app-release.apk LumenTV.apk
+
+      - name: Publish download link
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Lumen TV 1.0.${{ github.run_number }}
+          make_latest: true
+          files: LumenTV.apk
+          body: |
+            Install on Fire TV with the Downloader app using:
+            https://github.com/${{ github.repository }}/releases/latest/download/LumenTV.apk
