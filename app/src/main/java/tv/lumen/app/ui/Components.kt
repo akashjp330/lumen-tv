@@ -209,3 +209,28 @@ fun Poster(url: String?, title: String, modifier: Modifier = Modifier) {
         }
     }
 }
+
+private val qualityRx = Regex("""(?i)(?<![A-Za-z])(UHD|4K|FHD|HD|SD|HEVC|H\.?265)(?![A-Za-z])""")
+
+/** "USA ESPN SD" → "SD", "USA A&E UHD*" → "4K". Null when the name doesn't say. */
+fun qualityOf(name: String): String? = when (qualityRx.findAll(name).lastOrNull()?.value?.uppercase()?.replace(".", "")) {
+    "UHD", "4K" -> "4K"
+    "FHD" -> "FHD"
+    "HD" -> "HD"
+    "SD" -> "SD"
+    "HEVC", "H265" -> "HEVC"
+    else -> null
+}
+
+/** Small quality tag (4K / FHD / HD / SD) for a channel tile's corner. */
+@Composable
+fun QualityBadge(name: String, modifier: Modifier = Modifier) {
+    val q = qualityOf(name) ?: return
+    Text(
+        q,
+        style = T.chip.copy(color = if (q == "SD") C.Text2 else C.Ink),
+        modifier = modifier.clip(RoundedCornerShape(3.dp))
+            .background(if (q == "SD") C.Ink.copy(alpha = 0.75f) else LocalAccent.current)
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+    )
+}

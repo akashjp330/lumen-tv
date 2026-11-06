@@ -246,6 +246,7 @@ private fun TileView(
                         modifier = Modifier.padding(7.dp).clip(RoundedCornerShape(3.dp))
                             .background(C.Ink.copy(alpha = 0.75f)).padding(horizontal = 5.dp, vertical = 2.dp),
                     )
+                    QualityBadge(tile.ch.name, Modifier.align(Alignment.TopEnd).padding(7.dp))
                     if (p != null) ProgressBar(p.progress(now), Modifier.fillMaxWidth().align(Alignment.BottomCenter), height = 3.dp)
                 }
                 Spacer(Modifier.height(6.dp))

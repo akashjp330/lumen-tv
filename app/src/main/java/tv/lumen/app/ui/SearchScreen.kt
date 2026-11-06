@@ -24,7 +24,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.background
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -90,8 +92,24 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
             if (results.channels.isNotEmpty()) item {
                 Section("Channels") {
                     items(results.channels, key = { it.key }) { ch ->
-                        Focusable(onClick = { vm.playChannel(ch) }, modifier = Modifier.width(150.dp).height(84.dp)) {
-                            ChannelLogo(ch, Modifier.fillMaxSize().padding(14.dp))
+                        val p = repo.guide.at(ch.key, now)
+                        Column(Modifier.width(170.dp)) {
+                            Focusable(
+                                onClick = { vm.playChannel(ch, zapKeys = results.channels.map { it.key }) },
+                                modifier = Modifier.fillMaxWidth().height(95.dp),
+                                onMenu = { vm.openChannelMenu(ch) },
+                            ) {
+                                ChannelLogo(ch, Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 14.dp))
+                                Text(
+                                    ch.number.toString(), style = T.chip.copy(color = C.Text),
+                                    modifier = Modifier.padding(7.dp).clip(RoundedCornerShape(3.dp))
+                                        .background(C.Ink.copy(alpha = 0.75f)).padding(horizontal = 5.dp, vertical = 2.dp),
+                                )
+                                QualityBadge(ch.name, Modifier.align(Alignment.TopEnd).padding(7.dp))
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            OneLine(ch.name, T.title)
+                            OneLine(p?.let { "${it.title} · ${fmtLeft(it, now)}" } ?: "Ch ${ch.number}", T.meta)
                         }
                     }
                 }
