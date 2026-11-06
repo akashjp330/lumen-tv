@@ -34,6 +34,11 @@ data class WatchProgress(
 
 data class Reminder(val channelKey: String, val startMs: Long, val title: String)
 
+/** A named channel menu the user builds, like Favorites. */
+data class ChannelList(val id: String, val name: String, val keys: List<String>)
+
+const val FAVORITES_ID = "fav"
+
 /** Per-provider choices: favorites, hidden/locked categories, guide fixes, history. */
 data class UserPrefs(
     val favorites: List<String> = emptyList(),
@@ -44,7 +49,16 @@ data class UserPrefs(
     val recent: List<String> = emptyList(),
     val progress: Map<String, WatchProgress> = emptyMap(),
     val reminders: List<Reminder> = emptyList(),
-)
+    val lists: List<ChannelList> = emptyList(),
+    /** Seconds watched per channel, for "Most watched". */
+    val watchSec: Map<String, Long> = emptyMap(),
+) {
+    /** Favorites first, then the user's own lists. */
+    val allLists: List<ChannelList> get() = listOf(ChannelList(FAVORITES_ID, "Favorites", favorites)) + lists
+
+    fun mostWatched(minSec: Long = 60): List<Pair<String, Long>> =
+        watchSec.entries.filter { it.value >= minSec }.sortedByDescending { it.value }.map { it.key to it.value }
+}
 
 data class AppSettings(
     val pinHash: String? = null,
@@ -134,7 +148,58 @@ class Store(context: Context) {
     }
 
     fun pushRecent(channelKey: String) = updatePrefs { p ->
-        p.copy(recent = (listOf(channelKey) + p.recent.filterNot { it == channelKey }).take(20))
+        p.copy(recent = (listOf(channelKey) + p.recent.filterNot { it == channelKey }).take(60))
+    }
+
+    fun addWatchTime(channelKey: String, seconds: Long) {
+        if (seconds <= 0) return
+        updatePrefs { p -> p.copy(watchSec = p.watchSec + (channelKey to ((p.watchSec[channelKey] ?: 0L) + seconds))) }
+    }
+
+    fun clearWatchHistory() = updatePrefs { it.copy(recent = emptyList(), watchSec = emptyMap()) }
+
+    // ---------- channel lists ----------
+
+    fun listKeys(listId: String): List<String> =
+        prefs.value.allLists.firstOrNull { it.id == listId }?.keys.orEmpty()
+
+    private fun setListKeys(listId: String, keys: List<String>) = updatePrefs { p ->
+        if (listId == FAVORITES_ID) p.copy(favorites = keys)
+        else p.copy(lists = p.lists.map { if (it.id == listId) it.copy(keys = keys) else it })
+    }
+
+    fun toggleInList(listId: String, key: String) {
+        val keys = listKeys(listId)
+        setListKeys(listId, if (key in keys) keys - key else keys + key)
+    }
+
+    fun moveInList(listId: String, key: String, delta: Int) {
+        val keys = listKeys(listId).toMutableList()
+        val i = keys.indexOf(key)
+        val j = i + delta
+        if (i < 0 || j !in keys.indices) return
+        keys.removeAt(i); keys.add(j, key)
+        setListKeys(listId, keys)
+    }
+
+    /** Returns the new list's id. */
+    fun createList(name: String, firstKey: String? = null): String {
+        val id = "l" + System.currentTimeMillis().toString(36)
+        updatePrefs { p -> p.copy(lists = p.lists + ChannelList(id, name.trim().ifBlank { "My channels" }, listOfNotNull(firstKey))) }
+        return id
+    }
+
+    fun renameList(listId: String, name: String) = updatePrefs { p ->
+        p.copy(lists = p.lists.map { if (it.id == listId) it.copy(name = name.trim().ifBlank { it.name }) else it })
+    }
+
+    fun deleteList(listId: String) = updatePrefs { p -> p.copy(lists = p.lists.filterNot { it.id == listId }) }
+
+    fun moveList(listId: String, delta: Int) = updatePrefs { p ->
+        val l = p.lists.toMutableList()
+        val i = l.indexOfFirst { it.id == listId }
+        val j = i + delta
+        if (i < 0 || j !in l.indices) p else { val x = l.removeAt(i); l.add(j, x); p.copy(lists = l) }
     }
 
     fun saveProgress(w: WatchProgress) = updatePrefs { p ->
@@ -174,6 +239,12 @@ class Store(context: Context) {
                 reminders = o.objList("rem").mapNotNull { r ->
                     Reminder(r.text("c") ?: return@mapNotNull null, r.long("s") ?: return@mapNotNull null, r.text("t") ?: "")
                 },
+                lists = o.objList("lists").mapNotNull { l ->
+                    ChannelList(l.text("id") ?: return@mapNotNull null, l.text("n") ?: "My channels", l.strList("k"))
+                },
+                watchSec = (o.obj("ws")?.map ?: emptyMap<Any, Any>()).entries.mapNotNull { e ->
+                    (e.value as? Number)?.toLong()?.let { e.key.toString() to it }
+                }.toMap(),
             )
         }.getOrDefault(UserPrefs())
     }
@@ -191,6 +262,9 @@ class Store(context: Context) {
                     "pos" to it.positionMs, "dur" to it.durationMs, "ts" to it.updatedMs, "sid" to it.seriesId)
             },
             "rem" to p.reminders.map { mapOf("c" to it.channelKey, "s" to it.startMs, "t" to it.title) },
+            "lists" to p.lists.map { mapOf("id" to it.id, "n" to it.name, "k" to it.keys) },
+            // keep the 300 most watched so the saved file stays small
+            "ws" to p.watchSec.entries.sortedByDescending { it.value }.take(300).associate { it.key to it.value },
         )
     )
 

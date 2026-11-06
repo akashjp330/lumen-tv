@@ -26,13 +26,21 @@ object XmltvParser {
         keepChannelIds: Set<String>? = null,
         /** ...plus channels declared in the file that this accepts (decided as <channel> elements stream past). */
         acceptChannel: ((EpgChannel) -> Boolean)? = null,
+        /**
+         * Programmes that ended before [nowMs] are only worth keeping on channels with
+         * catch-up. When set, past programmes are kept only for ids in [pastIds] or
+         * channels [acceptPast] accepts.
+         */
+        nowMs: Long? = null,
+        pastIds: Set<String>? = null,
+        acceptPast: ((EpgChannel) -> Boolean)? = null,
     ): XmltvData {
         val factory = SAXParserFactory.newInstance()
         factory.isNamespaceAware = false
         trySet(factory, "http://xml.org/sax/features/external-general-entities", false)
         trySet(factory, "http://xml.org/sax/features/external-parameter-entities", false)
         trySet(factory, "http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
-        val handler = Handler(fromMs, toMs, keepChannelIds, acceptChannel)
+        val handler = Handler(fromMs, toMs, keepChannelIds, acceptChannel, nowMs, pastIds, acceptPast)
         val parser = factory.newSAXParser()
         val source = InputSource(input)
         try {
@@ -54,7 +62,12 @@ object XmltvParser {
         val toMs: Long,
         val keep: Set<String>?,
         val accept: ((EpgChannel) -> Boolean)?,
+        val nowMs: Long?,
+        val pastIds: Set<String>?,
+        val acceptPast: ((EpgChannel) -> Boolean)?,
     ) : DefaultHandler() {
+        private val pastAccepted = HashSet<String>()
+        private fun pastWanted(id: String) = nowMs == null || pastIds?.contains(id) == true || id in pastAccepted
         val channels = ArrayList<EpgChannel>()
         private val accepted = HashSet<String>()
         private val filtering = keep != null || accept != null
@@ -90,7 +103,8 @@ object XmltvParser {
                     val start = parseTime(a.getValue("start"))
                     val stop = parseTime(a.getValue("stop")) ?: start?.plus(30 * 60_000L)
                     val wanted = ch != null && start != null && stop != null &&
-                        stop > fromMs && start < toMs && wanted(ch)
+                        stop > fromMs && start < toMs && wanted(ch) &&
+                        (nowMs == null || stop > nowMs || pastWanted(ch))
                     inProg = true
                     pChannel = if (wanted) ch else null
                     pStart = start ?: 0; pStop = stop ?: 0
@@ -112,13 +126,14 @@ object XmltvParser {
             when (qName) {
                 "display-name" -> if (capture && !inProg) text.toString().trim().takeIf { it.isNotEmpty() }?.let { chNames.add(it) }
                 "title" -> if (capture && pTitle == null) pTitle = text.toString().trim()
-                "desc" -> if (capture && pDesc == null) pDesc = text.toString().trim()
+                "desc" -> if (capture && pDesc == null) pDesc = text.toString().trim().let { if (it.length > 400) it.take(397) + "…" else it }
                 "category" -> if (capture && pCat == null) pCat = text.toString().trim()
                 "channel" -> if (!inProg) {
                     chId?.let {
                         val c = EpgChannel(it, chNames, chIcon)
                         channels.add(c)
                         if (accept?.invoke(c) == true) accepted.add(it.lowercase())
+                        if (acceptPast?.invoke(c) == true) pastAccepted.add(it.lowercase())
                     }
                     chId = null
                 }

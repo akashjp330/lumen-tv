@@ -79,7 +79,10 @@ private fun Browse(
 ) {
     val prefs by vm.store.prefs.collectAsStateWithLifecycle()
     val settings by vm.store.settings.collectAsStateWithLifecycle()
-    val cats = remember(categories, prefs.hiddenCats) { categories.filter { catKey(type, it.id) !in prefs.hiddenCats } }
+    val counts = remember(items) { items.groupingBy { it.categoryId }.eachCount() }
+    val cats = remember(categories, prefs.hiddenCats, counts) {
+        categories.filter { catKey(type, it.id) !in prefs.hiddenCats && (counts[it.id] ?: 0) > 0 }
+    }
     val memKey = "browse_${type.name}"
     var selected by remember { mutableStateOf(vm.focusMemory[memKey] ?: ALL) }
     var pending by remember { mutableStateOf(selected) }
@@ -98,12 +101,12 @@ private fun Browse(
             Text(title, style = T.h1, modifier = Modifier.padding(start = 6.dp, bottom = 10.dp))
             LazyColumn(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 item {
-                    CategoryRow(if (isSeries) "Top rated" else "Recently added", selected == ALL,
+                    CategoryRow(if (isSeries) "Top rated" else "Recently added", null, selected == ALL,
                         Modifier.focusRequester(first)) { pending = ALL }
                 }
                 items(cats, key = { it.id }) { c ->
                     val locked = catKey(type, c.id) in prefs.lockedCats && settings.pinHash != null
-                    CategoryRow(c.name + if (locked) "  (locked)" else "", selected == c.id, Modifier) { pending = c.id }
+                    CategoryRow(displayCategory(c.name) + if (locked) "  (locked)" else "", counts[c.id], selected == c.id, Modifier) { pending = c.id }
                 }
             }
         }
@@ -132,7 +135,7 @@ private fun Browse(
 }
 
 @Composable
-private fun CategoryRow(name: String, selected: Boolean, modifier: Modifier, onFocus: () -> Unit) {
+private fun CategoryRow(name: String, count: Int?, selected: Boolean, modifier: Modifier, onFocus: () -> Unit) {
     Focusable(
         onClick = onFocus,
         modifier = modifier.fillMaxWidth().height(30.dp),
@@ -141,7 +144,9 @@ private fun CategoryRow(name: String, selected: Boolean, modifier: Modifier, onF
         focusedColor = C.Text, scale = 1f, ring = false,
         onFocus = { if (it) onFocus() },
     ) { f ->
-        OneLine(name, T.title.copy(color = if (f) C.Ink else if (selected) C.Text else C.Muted),
-            Modifier.align(Alignment.CenterStart).padding(horizontal = 10.dp))
+        Row(Modifier.fillMaxSize().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            OneLine(name, T.title.copy(color = if (f) C.Ink else if (selected) C.Text else C.Muted), Modifier.weight(1f))
+            if (count != null) Text("$count", style = T.meta.copy(color = if (f) C.Ink else C.Faint))
+        }
     }
 }

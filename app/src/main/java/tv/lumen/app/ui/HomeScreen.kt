@@ -46,13 +46,16 @@ import tv.lumen.app.data.catKey
 
 private sealed interface Tile {
     val id: String
-    data class Live(val ch: Channel) : Tile { override val id = "c:${ch.key}" }
+    data class Live(val ch: Channel, val note: String? = null) : Tile { override val id = "c:${ch.key}" }
     data class Resume(val w: WatchProgress) : Tile { override val id = "w:${w.id}" }
     data class Film(val m: Movie) : Tile { override val id = "m:${m.id}" }
     data class Show(val s: Series) : Tile { override val id = "s:${s.id}" }
 }
 
-private data class Rail(val title: String, val tiles: List<Tile>)
+private data class Rail(val title: String, val tiles: List<Tile>, val hint: String? = null, val key: String = "rail:$title") {
+    /** Channel up/down in the player stays within the row you started from. */
+    val zap: List<String> = tiles.mapNotNull { (it as? Tile.Live)?.ch?.key }
+}
 
 @Composable
 fun HomeScreen(vm: MainViewModel, repo: RepoState) {
@@ -66,28 +69,39 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
     val byKey = remember(visible) { visible.associateBy { it.key } }
     val minute = now / 60_000
 
-    val rails = remember(visible, prefs, guide, minute, catalog) {
+    val vodRails = remember(catalog, prefs.hiddenCats) {
+        val out = ArrayList<Rail>()
+        val newest = catalog.movies.asSequence()
+            .filter { catKey(ContentType.MOVIE, it.categoryId) !in prefs.hiddenCats }
+            .sortedByDescending { it.addedEpochSec ?: 0 }.take(20).toList()
+        if (newest.isNotEmpty()) out += Rail("Recently added movies", newest.map { Tile.Film(it) })
+        val shows = catalog.series.asSequence()
+            .filter { catKey(ContentType.SERIES, it.categoryId) !in prefs.hiddenCats }
+            .sortedByDescending { it.rating ?: 0.0 }.take(20).toList()
+        if (shows.isNotEmpty()) out += Rail("Top series", shows.map { Tile.Show(it) })
+        out
+    }
+
+    val rails = remember(visible, prefs, guide, minute, vodRails) {
         val out = ArrayList<Rail>()
         val resume = prefs.progress.values.filter { !it.finished }.sortedByDescending { it.updatedMs }.take(15)
         if (resume.isNotEmpty()) out += Rail("Continue watching", resume.map { Tile.Resume(it) })
-        val favs = prefs.favorites.mapNotNull { byKey[it] }
-        if (favs.isNotEmpty()) out += Rail("Favorite channels", favs.map { Tile.Live(it) })
-        val recent = prefs.recent.mapNotNull { byKey[it] }.filter { it.key !in prefs.favorites }.take(15)
+        for (list in prefs.allLists) {
+            val chans = list.keys.mapNotNull { byKey[it] }
+            if (chans.isNotEmpty()) out += Rail(list.name, chans.map { Tile.Live(it) }, key = "list:" + list.id)
+        }
+        val recent = prefs.recent.mapNotNull { byKey[it] }.take(25)
         if (recent.isNotEmpty()) out += Rail("Recently watched", recent.map { Tile.Live(it) })
+        // What you actually watch, that isn't a favorite yet.
+        val suggest = prefs.mostWatched(minSec = 10 * 60)
+            .filter { (k, _) -> k !in prefs.favorites }
+            .mapNotNull { (k, sec) -> byKey[k]?.let { Tile.Live(it, fmtWatched(sec)) } }.take(12)
+        if (suggest.isNotEmpty()) out += Rail("You watch these a lot", suggest, hint = "Press ≡ to add to Favorites or a list")
         val t = System.currentTimeMillis()
         val onNow = visible.asSequence().filter { guide.at(it.key, t) != null }.take(30).toList()
             .ifEmpty { visible.take(30) }
         out += Rail(if (guide.hasAny(visible)) "On now" else "Channels", onNow.map { Tile.Live(it) })
-        val hiddenMovieCats = prefs.hiddenCats
-        val newest = catalog.movies.asSequence()
-            .filter { catKey(ContentType.MOVIE, it.categoryId) !in hiddenMovieCats }
-            .sortedByDescending { it.addedEpochSec ?: 0 }.take(20).toList()
-        if (newest.isNotEmpty()) out += Rail("Recently added movies", newest.map { Tile.Film(it) })
-        val shows = catalog.series.asSequence()
-            .filter { catKey(ContentType.SERIES, it.categoryId) !in hiddenMovieCats }
-            .sortedByDescending { it.rating ?: 0.0 }.take(20).toList()
-        if (shows.isNotEmpty()) out += Rail("Top series", shows.map { Tile.Show(it) })
-        out
+        out + vodRails
     }
 
     var hero by remember {
@@ -98,6 +112,7 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
         )
     }
     var previewKey by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(rails) { vm.repo.ensureGuide(rails.flatMap { r -> r.tiles.mapNotNull { (it as? Tile.Live)?.ch } }.distinct()) }
     LaunchedEffect(hero?.key, settings.livePreview) {
         previewKey = null
         if (settings.livePreview && hero != null) {
@@ -116,14 +131,17 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
             contentPadding = PaddingValues(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            items(rails, key = { it.title }) { rail ->
+            items(rails, key = { it.key }) { rail ->
                 Column {
-                    Text(rail.title, style = T.h2, modifier = Modifier.padding(start = 40.dp, bottom = 6.dp))
+                    Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(start = 40.dp, bottom = 6.dp)) {
+                        Text(rail.title, style = T.h2)
+                        rail.hint?.let { Text("   $it", style = T.meta) }
+                    }
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 40.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        items(rail.tiles, key = { rail.title + it.id }) { tile ->
+                        items(rail.tiles, key = { rail.key + it.id }) { tile ->
                             val fr = remember { FocusRequester() }
                             val isRestore = !restored && tile.id == restoreId
                             val mod = if (isRestore) Modifier.focusRequester(fr) else Modifier
@@ -131,7 +149,7 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
                                 runCatching { fr.requestFocus() }
                                 restored = true
                             }
-                            TileView(vm, tile, guide, now, mod) { focused ->
+                            TileView(vm, tile, guide, now, mod, rail.zap) { focused ->
                                 if (focused) {
                                     vm.focusMemory["home"] = tile.id
                                     if (tile is Tile.Live) hero = tile.ch
@@ -188,9 +206,10 @@ private fun Hero(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
                 PillButton("Watch live", onClick = { vm.playChannel(ch) }, primary = true)
                 PillButton(
-                    if (ch.key in favorites) "Remove favorite" else "Add to favorites",
+                    if (ch.key in favorites) "★ Favorite" else "☆ Add to favorites",
                     onClick = { vm.store.toggleFavorite(ch.key) },
                 )
+                PillButton("Add to a list…", onClick = { vm.openChannelMenu(ch) })
             }
         }
     }
@@ -203,6 +222,7 @@ private fun TileView(
     guide: lumen.core.EpgIndex,
     now: Long,
     modifier: Modifier,
+    zap: List<String>,
     onFocus: (Boolean) -> Unit,
 ) {
     when (tile) {
@@ -210,11 +230,11 @@ private fun TileView(
             val p = guide.at(tile.ch.key, now)
             Column(Modifier.width(170.dp)) {
                 Focusable(
-                    onClick = { vm.playChannel(tile.ch) },
+                    onClick = { vm.playChannel(tile.ch, zapKeys = zap.takeIf { it.size > 1 }) },
                     modifier = modifier.fillMaxWidth().height(95.dp),
                     color = C.Surface,
                     onFocus = onFocus,
-                    onMenu = { vm.store.toggleFavorite(tile.ch.key) },
+                    onMenu = { vm.openChannelMenu(tile.ch) },
                 ) {
                     ChannelLogo(tile.ch, Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 14.dp))
                     Text(
@@ -226,7 +246,7 @@ private fun TileView(
                 }
                 Spacer(Modifier.height(6.dp))
                 OneLine(p?.title ?: tile.ch.name, T.title)
-                OneLine(if (p != null) "${tile.ch.name} · ${fmtLeft(p, now)}" else "Ch ${tile.ch.number}", T.meta)
+                OneLine(tile.note ?: if (p != null) "${tile.ch.name} · ${fmtLeft(p, now)}" else "Ch ${tile.ch.number}", T.meta)
             }
         }
         is Tile.Resume -> Column(Modifier.width(170.dp)) {

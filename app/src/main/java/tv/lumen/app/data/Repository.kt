@@ -104,6 +104,7 @@ class Repository(private val context: Context, val store: Store) {
         try {
             val fresh = SourceLoader(source, CachingFetcher(cacheDir(source), net, cacheFirst = false))
             val catalog = fresh.loadCatalog()
+            onDemand.clear(); asked.clear()
             _state.update { it.copy(catalog = catalog, error = null, lastRefreshMs = System.currentTimeMillis()) }
             DiagLog.log("Refreshed: ${catalog.channels.size} channels")
             loadGuide(fresh, catalog)
@@ -121,7 +122,7 @@ class Repository(private val context: Context, val store: Store) {
         val catalog = s.catalog ?: return
         val xmltv = s.xmltv ?: return
         scope.launch {
-            val index = EpgIndex.build(visibleChannels(catalog), xmltv, store.prefs.value.epgOverrides)
+            val index = EpgIndex.build(guideScope(catalog), xmltv, store.prefs.value.epgOverrides).withExtra(onDemand)
             _state.update { it.copy(guide = index) }
         }
     }
@@ -130,20 +131,20 @@ class Repository(private val context: Context, val store: Store) {
         _state.update { it.copy(guideLoading = true) }
         try {
             val prefs = store.prefs.value
-            val visible = visibleChannels(catalog)
-            val maxCatchup = visible.maxOfOrNull { it.catchupDays } ?: 0
-            val favs = prefs.favorites.mapNotNull { k -> visible.firstOrNull { it.key == k } }
+            val scope = guideScope(catalog)
+            val maxCatchup = scope.maxOfOrNull { it.catchupDays } ?: 0
+            val mine = myChannelKeys().mapNotNull { k -> scope.firstOrNull { it.key == k } }
             val result = l.loadGuide(
                 catalog = catalog,
                 nowMs = System.currentTimeMillis(),
                 daysBack = maxCatchup.coerceIn(0, 3),
                 daysAhead = 2,
                 overrides = prefs.epgOverrides,
-                shortEpgFor = (favs + visible).distinct().take(60),
-                guideChannels = visible,
+                shortEpgFor = (mine + scope).distinct().take(60),
+                guideChannels = scope,
             )
-            _state.update { it.copy(guide = result.index, xmltv = result.xmltv, guideError = result.error) }
-            DiagLog.log("Guide: ${result.xmltv.programCount} programmes, ${result.xmltv.channels.size} guide channels" +
+            _state.update { it.copy(guide = result.index.withExtra(onDemand), xmltv = result.xmltv, guideError = result.error) }
+            DiagLog.log("Guide: ${result.xmltv.programCount} programmes for ${scope.size} of ${catalog.channels.size} channels" +
                 (result.error?.let { " (error: $it)" } ?: ""))
         } catch (e: OutOfMemoryError) {
             DiagLog.log("Guide too large for this device's memory")
@@ -153,6 +154,43 @@ class Repository(private val context: Context, val store: Store) {
             _state.update { it.copy(guideError = friendly(e)) }
         } finally {
             _state.update { it.copy(guideLoading = false) }
+        }
+    }
+
+    /** Favorites, custom lists and recently watched: always get full guide data. */
+    private fun myChannelKeys(): List<String> {
+        val p = store.prefs.value
+        return (p.allLists.flatMap { it.keys } + p.recent + p.mostWatched().map { it.first }).distinct()
+    }
+
+    /**
+     * Channels whose full guide is kept in memory. Big providers (thousands of
+     * channels) get your channels plus the first [GUIDE_LIMIT] in provider order;
+     * the rest load now/next on demand as you scroll to them ([ensureGuide]).
+     */
+    fun guideScope(catalog: Catalog): List<Channel> {
+        val visible = visibleChannels(catalog)
+        if (visible.size <= GUIDE_LIMIT) return visible
+        val byKey = visible.associateBy { it.key }
+        val mine = myChannelKeys().mapNotNull { byKey[it] }
+        return (mine + visible).distinct().take(GUIDE_LIMIT + mine.size)
+    }
+
+    private val onDemand = java.util.concurrent.ConcurrentHashMap<String, List<lumen.core.Program>>()
+    private val asked = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    /** Fetches now/next for channels on screen that have no guide yet. */
+    fun ensureGuide(channels: List<Channel>) {
+        val l = loader ?: return
+        if (l.xtream == null) return
+        val idx = _state.value.guide
+        val need = channels.filter { !idx.hasGuide(it.key) && asked.add(it.key) }.take(20)
+        if (need.isEmpty()) return
+        scope.launch {
+            val got = l.shortEpg(need)
+            if (got.isEmpty()) return@launch
+            onDemand.putAll(got)
+            _state.update { it.copy(guide = it.guide.withExtra(got)) }
         }
     }
 
@@ -192,6 +230,7 @@ class Repository(private val context: Context, val store: Store) {
         const val USER_AGENT = "LumenTV/1.0 (Linux; Android) ExoPlayer"
         private const val STALE_MS = 12 * 3_600_000L
         private const val GUIDE_REFRESH_MS = 6 * 3_600_000L
+        private const val GUIDE_LIMIT = 2500
 
         fun friendly(e: Throwable): String = when (e) {
             is AuthException -> e.message ?: "Login failed."

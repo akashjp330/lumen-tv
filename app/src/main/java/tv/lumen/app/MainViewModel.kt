@@ -35,6 +35,7 @@ sealed interface Route {
     data object Diagnostics : Route
     data object ManageCategories : Route
     data object AddSource : Route
+    data object ManageLists : Route
 }
 
 /** What the player should play. Live requests carry the channel so up/down can zap. */
@@ -48,6 +49,8 @@ data class PlayRequest(
     val progressId: String? = null,
     val image: String? = null,
     val seriesId: String? = null,
+    /** Channel up/down moves through these (the list you started from); null = the channel's category. */
+    val zapKeys: List<String>? = null,
 ) {
     enum class Kind { LIVE, CATCHUP, MOVIE, EPISODE }
     val isLive get() = kind == Kind.LIVE
@@ -70,6 +73,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     var banner by mutableStateOf<Banner?>(null)
         private set
+
+    /** Channel whose options menu (≡ button) is open. */
+    var channelMenu by mutableStateOf<Channel?>(null)
+        private set
+
+    fun openChannelMenu(ch: Channel) { channelMenu = ch }
+    fun closeChannelMenu() { channelMenu = null }
 
     /** Last focused item per screen, so coming back from the player lands where you were. */
     val focusMemory = mutableMapOf<String, String>()
@@ -96,6 +106,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Returns false when there's nothing to pop (the activity should exit). */
     fun back(): Boolean {
         if (pinPrompt != null) { pinPrompt = null; return true }
+        if (channelMenu != null) { channelMenu = null; return true }
         if (stack.size <= 1) return false
         stack.removeAt(stack.lastIndex)
         return true
@@ -126,14 +137,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- playback ----------
 
-    fun channelRequest(ch: Channel, program: Program? = null) = PlayRequest(
-        kind = PlayRequest.Kind.LIVE, url = ch.streamUrl, title = program?.title ?: ch.name,
-        channelKey = ch.key, subtitle = ch.name, image = ch.logo,
+    fun channelRequest(ch: Channel, zapKeys: List<String>? = null) = PlayRequest(
+        kind = PlayRequest.Kind.LIVE, url = ch.streamUrl, title = ch.name,
+        channelKey = ch.key, subtitle = ch.name, image = ch.logo, zapKeys = zapKeys,
     )
 
-    fun playChannel(ch: Channel, replace: Boolean = false) = guarded(ContentType.LIVE, ch.categoryId) {
+    fun playChannel(ch: Channel, replace: Boolean = false, zapKeys: List<String>? = null) = guarded(ContentType.LIVE, ch.categoryId) {
         store.pushRecent(ch.key)
-        val route = Route.Player(channelRequest(ch))
+        val route = Route.Player(channelRequest(ch, zapKeys))
         if (replace && current is Route.Player) replaceTop(route) else go(route)
     }
 

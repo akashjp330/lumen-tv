@@ -4,7 +4,16 @@ package lumen.core
  * Guide data keyed by app channel key, after matching provider channels to
  * XMLTV channel ids.
  */
-class EpgIndex(private val byChannelKey: Map<String, List<Program>>) {
+class EpgIndex(val byChannelKey: Map<String, List<Program>>) {
+
+    /** Adds per-channel listings (e.g. fetched on demand) for channels that have none yet. */
+    fun withExtra(extra: Map<String, List<Program>>): EpgIndex {
+        if (extra.isEmpty()) return this
+        val m = HashMap(byChannelKey)
+        for ((k, v) in extra) if (m[k].isNullOrEmpty() && v.isNotEmpty()) m[k] = v.sortedBy { it.startMs }
+        return EpgIndex(m)
+    }
+
 
     fun programs(channelKey: String): List<Program> = byChannelKey[channelKey].orEmpty()
 
@@ -117,7 +126,8 @@ class EpgMatcher(private val xmltv: XmltvData) {
     }
 
     companion object {
-        private val prefix = Regex("""^\s*(\|[^|]*\||[A-Z]{2,3}\s*[:|\-]\s*)""")
+        /** "|US| ", "US: ", "UK - ", and the bare "USA " some providers put in front of every name. */
+        private val prefix = Regex("""^\s*(\|[^|]*\||[A-Z]{2,3}\s*[:|\-]\s*|(USA|US|UK|CA)\s+(?=\S))""")
         private val noise = Regex("""\b(fhd|uhd|hd|sd|4k|hevc|h265|raw|backup)\b""")
         private val bracketed = Regex("""[\[(][^\])]*[\])]""")
 

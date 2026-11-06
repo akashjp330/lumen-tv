@@ -198,6 +198,8 @@ class CoreTest {
         assertEquals("espn", EpgMatcher.normalize("US: ESPN HD (East)"))
         assertEquals("sportsone", EpgMatcher.normalize("|US| Sports One FHD"))
         assertEquals(EpgMatcher.normalize("A & E"), EpgMatcher.normalize("A&E"))
+        assertEquals("cnbc", EpgMatcher.normalize("USA CNBC"))
+        assertEquals("espn", EpgMatcher.normalize("USA ESPN HD"))
     }
 
     @Test fun cacheServesOfflineAfterFullRead() = FakeXtreamServer(nowSec).use { srv ->
@@ -214,6 +216,16 @@ class CoreTest {
         assertEquals("served from disk", before, srv.requests.size)
         dir.deleteRecursively()
         Unit // JUnit test methods must return void
+    }
+
+    @Test fun streamingJsonHandlesProviderQuirks() {
+        val txt = "\uFEFF" + """ [ {"a":"x\"y","n":-1.5e2,"l":[1,{"q":null}],"u":"\u00e9"} , {"a":"2"} ]"""
+        val got = JsonStream.mapObjects(txt.byteInputStream()) { it }
+        assertEquals(2, got.size)
+        assertEquals("x\"y", got[0].str("a")); assertEquals(-150.0, got[0].double("n")!!, 0.0); assertEquals("é", got[0].str("u"))
+        assertEquals(1, JsonStream.mapObjects("""{"7":{"a":1}}""".byteInputStream()) { it }.size)
+        assertEquals(0, JsonStream.mapObjects("".byteInputStream()) { it }.size)
+        try { JsonStream.mapObjects("""[{"a":1},{"a":""".byteInputStream()) { it }; fail() } catch (e: JsonException) { }
     }
 
     // ---------- misc ----------

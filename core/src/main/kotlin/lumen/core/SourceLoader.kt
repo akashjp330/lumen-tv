@@ -98,9 +98,18 @@ class SourceLoader(
             c.id.lowercase() in ids || EpgMatcher.normalize(c.id) in names ||
                 c.names.any { EpgMatcher.normalize(it) in names }
         }
+        val replay = guideChannels.filter { it.catchupDays > 0 }
+        val pastIds = HashSet<String>().apply {
+            replay.forEach { c -> c.epgId?.let { add(it.lowercase()) } }
+            overrides.filterKeys { k -> replay.any { it.key == k } }.values.forEach { add(it.lowercase()) }
+        }
+        val pastNames = replay.mapTo(HashSet()) { EpgMatcher.normalize(it.name) }.apply { remove("") }
+        val acceptPast: (EpgChannel) -> Boolean = { c ->
+            pastNames.isNotEmpty() && (EpgMatcher.normalize(c.id) in pastNames || c.names.any { EpgMatcher.normalize(it) in pastNames })
+        }
         catalog.epgUrl?.let { url ->
             try {
-                xmltv = http.open(url).use { XmltvParser.parse(it, from, to, ids, accept) }
+                xmltv = http.open(url).use { XmltvParser.parse(it, from, to, ids, accept, nowMs, pastIds, acceptPast) }
             } catch (e: Exception) {
                 error = LogScrubber.scrub(e.message ?: e.javaClass.simpleName)
             }
@@ -114,6 +123,14 @@ class SourceLoader(
         }
         val index = EpgIndex.build(guideChannels, xmltv, overrides, extra)
         return GuideResult(index, xmltv, error)
+    }
+
+    /** Now/next for channels outside the kept guide (Xtream only). */
+    fun shortEpg(channels: List<Channel>): Map<String, List<Program>> {
+        val x = xtream ?: return emptyMap()
+        val out = HashMap<String, List<Program>>()
+        for (ch in channels) runCatching { x.shortEpg(ch, limit = 6) }.getOrNull()?.let { if (it.isNotEmpty()) out[ch.key] = it }
+        return out
     }
 
     fun catchupUrl(ch: Channel, p: Program, nowMs: Long): String? {

@@ -47,7 +47,9 @@ import lumen.core.ContentType
 import lumen.core.Program
 import tv.lumen.app.MainViewModel
 import tv.lumen.app.data.RepoState
+import tv.lumen.app.data.FAVORITES_ID
 import tv.lumen.app.data.catKey
+import kotlinx.coroutines.delay
 
 private const val HALF_HOUR = 30 * 60_000L
 private const val WINDOW = 4 * HALF_HOUR
@@ -62,17 +64,33 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
     val guide = repo.guide
 
     val visible = remember(catalog, prefs.hiddenCats, prefs.hiddenChannels) { vm.repo.visibleChannels(catalog) }
-    var filter by remember { mutableStateOf(if (prefs.favorites.isNotEmpty()) "fav" else "all") }
-    val categories = remember(catalog, prefs.hiddenCats) {
-        catalog.liveCategories.filter { catKey(ContentType.LIVE, it.id) !in prefs.hiddenCats }
+    val byKey = remember(visible) { visible.associateBy { it.key } }
+    val counts = remember(visible) { visible.groupingBy { it.categoryId }.eachCount() }
+    var filter by remember {
+        mutableStateOf(vm.focusMemory["guideFilter"] ?: when {
+            prefs.favorites.isNotEmpty() -> "list:$FAVORITES_ID"
+            prefs.recent.isNotEmpty() -> "recent"
+            else -> "all"
+        })
     }
-    val rows = remember(visible, filter, prefs.favorites) {
-        when (filter) {
-            "all" -> visible
-            "fav" -> prefs.favorites.mapNotNull { k -> visible.firstOrNull { it.key == k } }.ifEmpty { visible }
-            else -> visible.filter { it.categoryId == filter }
+    var pickingCategory by remember { mutableStateOf(false) }
+    fun choose(f: String) { filter = f; vm.focusMemory["guideFilter"] = f }
+    val categories = remember(catalog, prefs.hiddenCats, counts) {
+        catalog.liveCategories.filter { catKey(ContentType.LIVE, it.id) !in prefs.hiddenCats && (counts[it.id] ?: 0) > 0 }
+    }
+    val rows = remember(visible, filter, prefs.allLists, prefs.recent, prefs.watchSec) {
+        when {
+            filter == "all" -> visible
+            filter == "recent" -> prefs.recent.mapNotNull { byKey[it] }
+            filter == "most" -> prefs.mostWatched().mapNotNull { byKey[it.first] }
+            filter.startsWith("list:") -> prefs.allLists.firstOrNull { "list:" + it.id == filter }?.keys.orEmpty().mapNotNull { byKey[it] }
+            filter.startsWith("cat:") -> visible.filter { "cat:" + it.categoryId == filter }
+            else -> visible
         }
     }
+    // Lists and history: channel up/down in the player stays inside this list.
+    val zap = remember(rows, filter) { if (filter == "all" || filter.startsWith("cat:")) null else rows.map { it.key } }
+    val categoryName = categories.firstOrNull { "cat:" + it.id == filter }?.let { displayCategory(it.name) }
 
     val maxBack = (rows.maxOfOrNull { it.catchupDays } ?: 0).coerceAtMost(3) * 86_400_000L
     var windowStart by remember { mutableLongStateOf(now - now % HALF_HOUR) }
@@ -105,14 +123,27 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
         }
         Spacer(Modifier.height(8.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            item { PillButton("Favorites", onClick = { filter = "fav" }, selected = filter == "fav") }
-            item { PillButton("All", onClick = { filter = "all" }, selected = filter == "all") }
-            items(categories, key = { it.id }) { c ->
-                PillButton(c.name, onClick = { filter = c.id }, selected = filter == c.id)
+            items(prefs.allLists, key = { it.id }) { l ->
+                PillButton("${l.name} · ${l.keys.size}", onClick = { choose("list:" + l.id) }, selected = filter == "list:" + l.id)
+            }
+            item { PillButton("Recently watched · ${prefs.recent.size}", onClick = { choose("recent") }, selected = filter == "recent") }
+            item { PillButton("Most watched", onClick = { choose("most") }, selected = filter == "most") }
+            item { PillButton("All · ${visible.size}", onClick = { choose("all") }, selected = filter == "all") }
+            item {
+                PillButton(if (categoryName != null) "$categoryName ▾" else "Categories ▾",
+                    onClick = { pickingCategory = true }, selected = categoryName != null)
             }
         }
         Spacer(Modifier.height(10.dp))
         DetailStrip(vm, focused, now, Modifier.fillMaxWidth().height(58.dp))
+        if (rows.isEmpty()) {
+            Text(when {
+                filter == "recent" -> "Channels you watch will show up here."
+                filter == "most" -> "After you've watched a few channels, the ones you watch most show up here — a good guide to what belongs in Favorites."
+                filter.startsWith("list:") -> "This list is empty. Press ≡ on any channel to add it."
+                else -> "No channels here."
+            }, style = T.body)
+        }
         val guideError = repo.guideError
         if (guideError != null && !guide.hasAnyGuide(rows)) Text(guideError, style = T.meta.copy(color = C.Live))
         Spacer(Modifier.height(6.dp))
@@ -153,6 +184,8 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
                             vm = vm, ch = ch, programs = guide.window(ch.key, windowStart, windowStart + WINDOW),
                             windowStart = windowStart, dpPerMs = dpPerMs, channelCol = channelCol, now = now,
                             favorite = ch.key in prefs.favorites,
+                            zap = zap,
+                            watchedSec = if (filter == "most") prefs.watchSec[ch.key] else null,
                             reminders = reminderStarts[ch.key].orEmpty(),
                             requestFocus = !restored && ch.key == restoreKey,
                             onRestored = { restored = true },
@@ -164,12 +197,26 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
                     }
                 }
             }
+            LaunchedEffect(listState.firstVisibleItemIndex, rows) {
+                delay(400)
+                val i = listState.firstVisibleItemIndex
+                if (rows.isNotEmpty()) vm.repo.ensureGuide(rows.subList(i.coerceAtMost(rows.size - 1), (i + 16).coerceAtMost(rows.size)))
+            }
             // red "now" line
             if (now in windowStart until windowStart + WINDOW) {
                 val x = channelCol + ((now - windowStart) * dpPerMs).dp
                 Box(Modifier.offset(x = x, y = 18.dp).width(2.dp).fillMaxHeight().background(C.Live))
             }
         }
+    }
+    if (pickingCategory) {
+        CategoryPicker(
+            title = "Live TV categories",
+            items = categories.map { Triple(it.id, displayCategory(it.name), counts[it.id] ?: 0) },
+            selected = filter.removePrefix("cat:"),
+            onPick = { id -> choose("cat:$id"); pickingCategory = false },
+            onClose = { pickingCategory = false },
+        )
     }
 }
 
@@ -185,6 +232,8 @@ private fun GuideRow(
     channelCol: Dp,
     now: Long,
     favorite: Boolean,
+    zap: List<String>?,
+    watchedSec: Long?,
     reminders: Set<Long>,
     requestFocus: Boolean,
     onRestored: () -> Unit,
@@ -194,17 +243,20 @@ private fun GuideRow(
     val fr = remember { FocusRequester() }
     Row(Modifier.fillMaxWidth().height(46.dp).padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
         Focusable(
-            onClick = { vm.playChannel(ch) },
+            onClick = { vm.playChannel(ch, zapKeys = zap) },
             modifier = Modifier.width(channelCol - 6.dp).fillMaxHeight(),
             color = C.Ink, focusedColor = C.Raised, scale = 1f,
             onFocus = { if (it) onFocus(null) },
-            onMenu = { vm.store.toggleFavorite(ch.key) },
+            onMenu = { vm.openChannelMenu(ch) },
         ) {
             Row(Modifier.fillMaxSize().padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(ch.number.toString(), style = T.meta, modifier = Modifier.width(30.dp))
+                Text(ch.number.toString(), style = T.meta, modifier = Modifier.width(34.dp))
                 ChannelLogo(ch, Modifier.width(40.dp).height(28.dp).clip(RoundedCornerShape(5.dp)).background(C.Surface2), monogramSize = 22.dp)
                 Spacer(Modifier.width(6.dp))
-                OneLine((if (favorite) "★ " else "") + ch.name, T.title.copy(color = C.Text2))
+                Column {
+                    OneLine((if (favorite) "★ " else "") + ch.name, T.title.copy(color = C.Text2))
+                    if (watchedSec != null) Text(fmtWatched(watchedSec), style = T.meta)
+                }
             }
         }
         Spacer(Modifier.width(6.dp))
@@ -212,7 +264,7 @@ private fun GuideRow(
         if (programs.isEmpty()) {
             val cellMod = Modifier.width(((windowEnd - windowStart) * dpPerMs).dp - 6.dp).fillMaxHeight()
             Focusable(
-                onClick = { vm.playChannel(ch) },
+                onClick = { vm.playChannel(ch, zapKeys = zap) },
                 modifier = if (requestFocus) cellMod.focusRequester(fr) else cellMod,
                 color = C.Surface, focusedColor = C.Text, scale = 1f, ring = false,
                 onFocus = { if (it) onFocus(null) },
@@ -239,9 +291,9 @@ private fun GuideRow(
                 Focusable(
                     onClick = {
                         when {
-                            airing -> vm.playChannel(ch)
+                            airing -> vm.playChannel(ch, zapKeys = zap)
                             replay -> vm.playCatchup(ch, p)
-                            past -> vm.playChannel(ch)
+                            past -> vm.playChannel(ch, zapKeys = zap)
                             else -> vm.toggleReminder(ch, p)
                         }
                     },
@@ -251,7 +303,7 @@ private fun GuideRow(
                     focusedColor = C.Text,
                     scale = 1f, ring = false,
                     onFocus = { if (it) onFocus(p) },
-                    onMenu = { vm.store.toggleFavorite(ch.key) },
+                    onMenu = { vm.openChannelMenu(ch) },
                 ) { f ->
                     Column(Modifier.align(Alignment.CenterStart).padding(horizontal = 8.dp)) {
                         OneLine(p.title.ifBlank { "Untitled" }, T.title.copy(color = if (f) C.Ink else if (past) C.Faint else C.Text))

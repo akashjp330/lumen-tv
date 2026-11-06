@@ -140,12 +140,31 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
     // position ticker + periodic progress save
     LaunchedEffect(Unit) {
         var n = 0
-        while (true) {
-            delay(1_000)
-            position = player.currentPosition
-            duration = player.duration.takeIf { it > 0 } ?: 0
-            if (++n % 15 == 0 && !latestReq.isLive) vm.saveProgress(latestReq, position, duration)
+        var liveSec = 0L
+        var liveKey: String? = null
+        try {
+            while (true) {
+                delay(1_000)
+                position = player.currentPosition
+                duration = player.duration.takeIf { it > 0 } ?: 0
+                val r = latestReq
+                if (++n % 15 == 0 && !r.isLive) vm.saveProgress(r, position, duration)
+                // Count live viewing time per channel for "Most watched".
+                if (r.isLive && r.channelKey != liveKey) {
+                    liveKey?.let { vm.store.addWatchTime(it, liveSec) }
+                    liveKey = r.channelKey; liveSec = 0
+                }
+                if (r.isLive && player.isPlaying) liveSec++
+                if (liveSec >= 60) { liveKey?.let { vm.store.addWatchTime(it, liveSec) }; liveSec = 0 }
+            }
+        } finally {
+            liveKey?.let { vm.store.addWatchTime(it, liveSec) }
         }
+    }
+    LaunchedEffect(channel?.key) { channel?.let { vm.repo.ensureGuide(listOf(it)) } }
+    // Give focus back to the player after the ≡ menu closes.
+    LaunchedEffect(vm.channelMenu) {
+        if (vm.channelMenu == null) { delay(50); runCatching { (if (overlay) firstButton else rootFr).requestFocus() } }
     }
 
     // auto-hide the overlay
@@ -164,14 +183,15 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
         if (vm.isLocked(ContentType.LIVE, ch.categoryId)) { vm.playChannel(ch, replace = true); return }
         if (ch.key != req.channelKey) previousKey = req.channelKey
         vm.store.pushRecent(ch.key)
-        req = vm.channelRequest(ch)
+        req = vm.channelRequest(ch, req.zapKeys)
         overlay = true
         touch++
     }
 
     fun zap(delta: Int) {
         val cur = channel ?: return
-        val list = visible.filter { it.categoryId == cur.categoryId }.ifEmpty { visible }
+        val fromList = req.zapKeys?.mapNotNull { k -> visible.firstOrNull { it.key == k } }?.takeIf { it.size > 1 && cur in it }
+        val list = fromList ?: visible.filter { it.categoryId == cur.categoryId }.ifEmpty { visible }
         if (list.isEmpty()) return
         val i = list.indexOfFirst { it.key == cur.key }.coerceAtLeast(0)
         switchTo(list[(i + delta).mod(list.size)])
@@ -189,6 +209,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
     fun togglePlay() { if (player.isPlaying) player.pause() else player.play() }
 
     fun handleKey(e: KeyEvent): Boolean {
+        if (vm.channelMenu != null || vm.pinPrompt != null) return false
         val code = e.nativeKeyEvent.keyCode
         val down = e.type == KeyEventType.KeyDown
         touch++
@@ -213,6 +234,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 AndroidKeyEvent.KEYCODE_DPAD_UP -> zap(+1)
                 AndroidKeyEvent.KEYCODE_DPAD_DOWN -> zap(-1)
                 AndroidKeyEvent.KEYCODE_DPAD_LEFT -> channelOf(previousKey)?.let { switchTo(it) } ?: vm.showBanner("No previous channel yet")
+                AndroidKeyEvent.KEYCODE_MENU -> channel?.let { vm.openChannelMenu(it) }
                 AndroidKeyEvent.KEYCODE_BACK -> return false
                 else -> overlay = true
             }
@@ -269,6 +291,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                         val fav = channel.key in prefs.favorites
                         PillButton(if (fav) "★ Favorite" else "☆ Add favorite", onClick = { vm.store.toggleFavorite(channel.key) },
                             modifier = Modifier.focusRequester(firstButton))
+                        PillButton("Add to a list…", onClick = { vm.openChannelMenu(channel) })
                         val p = repo.guide.at(channel.key, now)
                         if (p != null && channel.catchupDays > 0 && Catchup.isAvailable(channel, p, now)) {
                             PillButton("Start over", onClick = { vm.playCatchup(channel, p) })
@@ -294,7 +317,8 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    if (req.isLive) "▲ ▼ change channel  ·  ◀ previous channel  ·  0–9 type a channel number  ·  Back hides this"
+                    if (req.isLive) "▲ ▼ change channel" + (if (req.zapKeys != null) " in this list" else "") +
+                        "  ·  ◀ previous channel  ·  0–9 channel number  ·  ≡ lists  ·  Back hides this"
                     else "◀ back 10 s  ·  ▶ ahead 30 s  ·  OK pause  ·  Back hides this",
                     style = T.meta,
                 )

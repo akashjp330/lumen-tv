@@ -69,6 +69,13 @@ class XtreamClient(
     fun movieCategories() = categories("get_vod_categories", ContentType.MOVIE)
     fun seriesCategories() = categories("get_series_categories", ContentType.SERIES)
 
+    /** Streams a list response; see [JsonStream]. */
+    private fun <T> stream(url: String, f: (JsonObj) -> T?): List<T> = try {
+        http.open(url).use { JsonStream.mapObjects(it, f) }
+    } catch (e: JsonException) {
+        throw java.io.IOException("The server sent a list we couldn't read: ${e.message}")
+    }
+
     private fun categories(action: String, type: ContentType): List<Category> =
         Json.parseObjectList(http.getText(apiUrl(action))).mapNotNull { o ->
             val id = o.text("category_id") ?: return@mapNotNull null
@@ -78,10 +85,9 @@ class XtreamClient(
     // ---------- live ----------
 
     fun liveChannels(preferHls: Boolean = false): List<Channel> {
-        val list = Json.parseObjectList(http.getText(apiUrl("get_live_streams")))
         var fallbackNumber = 0
-        return list.mapNotNull { o ->
-            val id = o.long("stream_id") ?: return@mapNotNull null
+        return stream(apiUrl("get_live_streams")) { o ->
+            val id = o.long("stream_id") ?: return@stream null
             fallbackNumber++
             Channel(
                 key = id.toString(),
@@ -101,9 +107,9 @@ class XtreamClient(
 
     // ---------- movies ----------
 
-    fun movies(): List<Movie> =
-        Json.parseObjectList(http.getText(apiUrl("get_vod_streams"))).mapNotNull { o ->
-            val id = o.long("stream_id") ?: return@mapNotNull null
+    fun movies(categoryId: String? = null): List<Movie> =
+        stream(apiUrl("get_vod_streams", categoryId?.let { mapOf("category_id" to it) } ?: emptyMap())) { o ->
+            val id = o.long("stream_id") ?: return@stream null
             val ext = o.text("container_extension") ?: "mp4"
             Movie(
                 id = id.toString(),
@@ -137,8 +143,8 @@ class XtreamClient(
     // ---------- series ----------
 
     fun series(): List<Series> =
-        Json.parseObjectList(http.getText(apiUrl("get_series"))).mapNotNull { o ->
-            val id = o.long("series_id") ?: return@mapNotNull null
+        stream(apiUrl("get_series")) { o ->
+            val id = o.long("series_id") ?: return@stream null
             Series(
                 id = id.toString(),
                 name = o.text("name") ?: "Series $id",

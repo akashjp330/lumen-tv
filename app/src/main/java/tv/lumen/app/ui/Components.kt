@@ -144,10 +144,14 @@ fun Monogram(name: String, size: Dp = 44.dp) {
     }
 }
 
+/** "Movie-Action" → "Action", "Series-Drama" → "Drama". */
+fun displayCategory(name: String): String =
+    name.replace(Regex("""^\s*(movies?|series|vod|tv)\s*[-:|]\s*""", RegexOption.IGNORE_CASE), "").ifBlank { name }
+
 private val noiseWords = setOf("hd", "fhd", "uhd", "4k", "sd", "the", "tv")
 
 fun monogramOf(name: String): String {
-    val cleaned = name.replace(Regex("""^\s*([A-Z]{2,3}\s*[:|\-]\s*|\|[^|]*\|)"""), "")
+    val cleaned = name.replace(Regex("""^\s*([A-Z]{2,3}\s*[:|\-]\s*|\|[^|]*\||(USA|US|UK|CA)\s+(?=\S))"""), "")
     val words = cleaned.split(Regex("""[\s\-_:|]+""")).filter { it.isNotBlank() && it.lowercase() !in noiseWords }
     return when {
         words.isEmpty() -> name.take(2).uppercase()

@@ -55,6 +55,7 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
         value = runCatching { vm.repo.accountNow() }
     }
     var confirmSignOut by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
     var pinField by remember { mutableStateOf("") }
     var tmdbField by remember { mutableStateOf(settings.tmdbKey ?: "") }
     val first = remember { FocusRequester() }
@@ -145,6 +146,18 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
         }
         item { PillButton("Hide or lock categories", onClick = { vm.go(Route.ManageCategories) }) }
 
+        item { Heading("My channels") }
+        item { Text("Favorites and your own lists. Press ≡ on any channel to add it to one.", style = T.body) }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PillButton("Edit my lists", onClick = { vm.go(Route.ManageLists) })
+                PillButton(if (confirmClear) "Press again to clear" else "Clear watch history", onClick = {
+                    if (confirmClear) { vm.store.clearWatchHistory(); confirmClear = false; vm.showBanner("Watch history cleared") }
+                    else confirmClear = true
+                })
+            }
+        }
+
         item { Heading("Artwork") }
         item {
             Text("Optional: a free TMDB API key (themoviedb.org → Settings → API) fills in missing movie and series artwork.", style = T.body)
@@ -206,6 +219,13 @@ fun ManageCategoriesScreen(vm: MainViewModel, repo: RepoState) {
         ContentType.MOVIE -> catalog.movieCategories
         ContentType.SERIES -> catalog.seriesCategories
     }
+    val counts = remember(catalog, type) {
+        when (type) {
+            ContentType.LIVE -> catalog.channels.groupingBy { it.categoryId }.eachCount()
+            ContentType.MOVIE -> catalog.movies.groupingBy { it.categoryId }.eachCount()
+            ContentType.SERIES -> catalog.series.groupingBy { it.categoryId }.eachCount()
+        }
+    }
     val first = remember { FocusRequester() }
     Column(Modifier.fillMaxSize().padding(start = 32.dp, top = 24.dp, end = 32.dp)) {
         Text("Categories", style = T.h1)
@@ -221,12 +241,23 @@ fun ManageCategoriesScreen(vm: MainViewModel, repo: RepoState) {
         }
         Spacer(Modifier.height(10.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(bottom = 32.dp)) {
+            if (type == ContentType.LIVE && prefs.hiddenChannels.isNotEmpty()) {
+                item { Text("Hidden channels", style = T.meta) }
+                items(prefs.hiddenChannels.toList(), key = { "h_$it" }) { k ->
+                    val ch = catalog.channels.firstOrNull { it.key == k }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(ch?.name ?: k, style = T.title.copy(color = C.Faint), modifier = Modifier.width(360.dp))
+                        PillButton("Show again", onClick = { vm.store.updatePrefs { p -> p.copy(hiddenChannels = p.hiddenChannels - k) } })
+                    }
+                }
+                item { Spacer(Modifier.height(8.dp)); Text("Categories", style = T.meta) }
+            }
             items(cats, key = { it.id }) { c ->
                 val k = catKey(type, c.id)
                 val hidden = k in prefs.hiddenCats
                 val locked = k in prefs.lockedCats
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(c.name, style = T.title.copy(color = if (hidden) C.Faint else C.Text), modifier = Modifier.width(360.dp))
+                    Text(displayCategory(c.name) + "  ·  ${counts[c.id] ?: 0}", style = T.title.copy(color = if (hidden) C.Faint else C.Text), modifier = Modifier.width(360.dp))
                     PillButton(if (hidden) "Hidden" else "Shown", selected = !hidden, onClick = {
                         vm.store.updatePrefs { p -> p.copy(hiddenCats = if (hidden) p.hiddenCats - k else p.hiddenCats + k) }
                     })

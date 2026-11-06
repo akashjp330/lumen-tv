@@ -40,7 +40,7 @@ Whenever the code changes, upload the changed files to GitHub. When the new buil
 | Where | Button | Does |
 |---|---|---|
 | Anywhere | OK | Open / play |
-| Anywhere | ≡ (menu) | Favorite a channel (on a channel tile or guide row) |
+| Anywhere | ≡ (menu) | Channel options: add to Favorites or a list, make a new list, hide |
 | Live TV | ▲ ▼ | Next / previous channel |
 | Live TV | ◀ | Jump back to the previous channel |
 | Live TV | 0–9 | Type a channel number |
@@ -68,6 +68,9 @@ Whenever the code changes, upload the changed files to GitHub. When the new buil
   - reconnects automatically when a stream drops
   - audio and subtitle selection
   - "Start over" on channels with catch-up
+- Your own channel lists, like Favorites. Press ≡ on any channel to add it to Favorites or a list, or to make a new list. Lists show as rows on Home and as filters in the guide, and channel up/down stays inside the list you started from.
+- Recently watched (the last 60) and Most watched, ranked by time actually watched. Home suggests channels you watch a lot that aren't favorites yet.
+- Built for big providers: tested with 9,671 channels, 57,013 movies and 13,528 series. The full guide is kept for your channels plus the first 2,500. Other channels load what's on now and next as you scroll to them.
 - Multiview with up to 4 channels. The highlighted tile plays sound.
 - Movies and series with posters, details, seasons and episodes, and resume. Missing artwork can come from TMDB with an optional free key.
 - Search across channels, guide listings, movies and series.

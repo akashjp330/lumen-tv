@@ -66,6 +66,7 @@ fun AppRoot(vm: MainViewModel, onExit: () -> Unit) {
                     repo.catalog == null -> Splash(repo.loading)
                     else -> MainArea(vm, repo)
                 }
+                vm.channelMenu?.let { ChannelMenu(vm, it) }
                 vm.pinPrompt?.let { PinDialog(vm) }
                 vm.banner?.let { BannerView(vm, it) }
             }
@@ -93,6 +94,7 @@ private fun MainArea(vm: MainViewModel, repo: RepoState) {
                         Route.Diagnostics -> DiagnosticsScreen()
                         Route.ManageCategories -> ManageCategoriesScreen(vm, repo)
                         Route.AddSource -> LoginScreen(vm, firstRun = false)
+                        Route.ManageLists -> ManageListsScreen(vm, repo)
                         is Route.MovieDetail -> MovieDetailScreen(vm, route.movie)
                         is Route.SeriesDetail -> SeriesDetailScreen(vm, route.series)
                         else -> Unit
@@ -120,7 +122,7 @@ private fun NavRail(vm: MainViewModel, current: Route) {
     val section = when (current) {
         is Route.MovieDetail -> Route.Movies
         is Route.SeriesDetail -> Route.Series
-        Route.Diagnostics, Route.ManageCategories, Route.AddSource -> Route.Settings
+        Route.Diagnostics, Route.ManageCategories, Route.AddSource, Route.ManageLists -> Route.Settings
         else -> current
     }
     Column(
