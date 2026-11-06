@@ -279,8 +279,8 @@ class Repository(private val context: Context, val store: Store) {
         fun friendly(e: Throwable): String = when (e) {
             is AuthException -> e.message ?: "Login failed."
             is java.net.UnknownHostException -> "Can't find that server. Check the address and your internet connection."
-            is java.net.SocketTimeoutException -> "The server took too long to answer. If your provider's own app can't connect right now either, " +
-                "the provider may be briefly blocking this device after too many connections; that usually clears within an hour."
+            is java.net.SocketTimeoutException -> "The server didn't answer. Double-check the server address and port number. " +
+                "If they're right and your provider's own app can't connect either, the provider may be down or briefly blocking this device; try again later."
             is java.net.ConnectException -> "Couldn't connect to the server. Check the address and port."
             is lumen.core.HttpException -> "The server answered with an error (${e.code})."
             is IOException -> "Network problem: ${LogScrubber.scrub(e.message ?: "unknown")}"
