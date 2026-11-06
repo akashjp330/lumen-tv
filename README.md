@@ -26,14 +26,14 @@ You do this once. After that, updates take two minutes.
 
 ### 3. Install
 
-1. Open Downloader and type this address, using your GitHub username:
-   `https://github.com/YOUR-USERNAME/lumen-tv/releases/latest/download/LumenTV.apk`
+1. Open Downloader and type the code **9667181**.
+   (Or the full address: `https://github.com/akashjp330/lumen-tv/releases/latest/download/LumenTV.apk`)
 2. Choose **Install**. When it finishes, **Delete** the downloaded file to save space.
 3. Lumen TV appears in **Your Apps & Channels**. Hold the Home button and pick **Apps** if you want to move it to the front.
 
 ### Updating
 
-Whenever the code changes, upload the changed files to GitHub. When the new build is green, run the same Downloader address again. It installs over the old version and keeps your login and favorites.
+Whenever the code changes, upload the changed files to GitHub. When the new build is green, enter **9667181** in Downloader again. It installs over the old version and keeps your login and favorites.
 
 ## Remote control
 
