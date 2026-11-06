@@ -62,7 +62,7 @@ data class UserPrefs(
 
 data class AppSettings(
     val pinHash: String? = null,
-    val livePreview: Boolean = true,
+    val livePreview: Boolean = false,
     val tmdbKey: String? = null,
     val preferHls: Boolean = false,
     val accent: Long = 0xFF4C8DFF,
@@ -274,7 +274,7 @@ class Store(context: Context) {
         val next = f(_settings.value)
         _settings.value = next
         sp.edit().putString("settings", Json.write(
-            mapOf("pin" to next.pinHash, "lp" to next.livePreview, "tmdb" to next.tmdbKey, "hls" to next.preferHls, "acc" to next.accent)
+            mapOf("pin" to next.pinHash, "lp2" to next.livePreview, "tmdb" to next.tmdbKey, "hls" to next.preferHls, "acc" to next.accent)
         )).apply()
     }
 
@@ -284,7 +284,7 @@ class Store(context: Context) {
             val o: JsonObj = Json.parseObject(raw)
             AppSettings(
                 pinHash = o.text("pin"),
-                livePreview = o.raw("lp")?.let { o.bool("lp") } ?: true,
+                livePreview = o.bool("lp2"),
                 tmdbKey = o.text("tmdb"),
                 preferHls = o.bool("hls"),
                 accent = o.long("acc") ?: 0xFF4C8DFF,

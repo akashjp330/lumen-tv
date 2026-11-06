@@ -106,8 +106,8 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
 
     var hero by remember {
         mutableStateOf(
-            prefs.recent.firstNotNullOfOrNull { byKey[it] }
-                ?: prefs.favorites.firstNotNullOfOrNull { byKey[it] }
+            prefs.favorites.firstNotNullOfOrNull { byKey[it] }
+                ?: prefs.recent.firstNotNullOfOrNull { byKey[it] }
                 ?: visible.firstOrNull()
         )
     }
@@ -155,7 +155,8 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
                             TileView(vm, tile, guide, now, mod, rail.zap) { focused ->
                                 if (focused) {
                                     vm.focusMemory["home"] = tile.id
-                                    if (tile is Tile.Live) hero = tile.ch
+                                    // The big banner features your favorites; with none yet, it follows focus.
+                                    if (tile is Tile.Live && (prefs.favorites.isEmpty() || tile.ch.key in prefs.favorites)) hero = tile.ch
                                 }
                             }
                         }

@@ -119,7 +119,7 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
 
         item { Heading("Home screen") }
         item {
-            Toggle("Play a muted preview of the highlighted channel", settings.livePreview) {
+            Toggle("Play a muted video preview on the Home banner (uses one of your streams)", settings.livePreview) {
                 vm.store.updateSettings { s -> s.copy(livePreview = !s.livePreview) }
             }
         }

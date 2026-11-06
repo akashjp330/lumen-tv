@@ -84,5 +84,5 @@ fun LivePreview(url: String, modifier: Modifier = Modifier) {
     val player = remember { PlayerFactory.create(ctx, muted = true, small = true) }
     DisposableEffect(Unit) { onDispose { player.release() } }
     LaunchedEffect(url) { PlayerFactory.play(player, url) }
-    VideoSurface(player, modifier, zoom = true)
+    VideoSurface(player, modifier, zoom = false)
 }
