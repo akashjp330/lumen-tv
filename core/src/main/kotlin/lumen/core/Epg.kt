@@ -155,12 +155,15 @@ class EpgMatcher(private val epgChannels: List<EpgChannel>, idsWithData: Set<Str
         private val bracketed = Regex("""[\[(][^\])]*[\])]""")
 
         /** "US: ESPN HD (East)" -> "espn". Lossy on purpose. */
-        fun normalize(name: String): String {
+        fun normalize(name: String): String = normalizeSpaced(name).filter { it.isLetterOrDigit() }
+
+        /** Like [normalize] but keeps word breaks, for further word filtering. */
+        fun normalizeSpaced(name: String): String {
             var s = prefix.replace(name, "")
             s = bracketed.replace(s, " ")
-            s = s.lowercase().replace('&', ' ').replace("+", "plus")
+            s = s.lowercase().replace('&', ' ').replace("+", "plus").replace('*', ' ')
             s = noise.replace(s, " ")
-            return s.filter { it.isLetterOrDigit() }
+            return s
         }
     }
 }

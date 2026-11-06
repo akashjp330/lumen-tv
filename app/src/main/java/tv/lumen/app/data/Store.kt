@@ -64,8 +64,17 @@ data class AppSettings(
     val pinHash: String? = null,
     val livePreview: Boolean = false,
     val tmdbKey: String? = null,
-    val preferHls: Boolean = false,
     val accent: Long = 0xFF4C8DFF,
+    /** 0 = normal, 1 = large, 2 = maximum. Bigger rides out hiccups; channel changes take a moment longer. */
+    val bufferLevel: Int = 1,
+    /** "auto" (TS, switching per channel when one struggles), "ts" or "hls". */
+    val streamFormat: String = "auto",
+    val softwareDecoder: Boolean = false,
+    /** "fit", "fill" (zoom to fill, crops edges) or "stretch". */
+    val pictureShape: String = "fit",
+    val startOnLastChannel: Boolean = false,
+    /** Live pause & rewind: keep a buffer of the channel you're watching on the device. */
+    val timeshift: Boolean = true,
 )
 
 /** A person using the app. Each has their own favorites, lists, history and resume points. */
@@ -368,7 +377,9 @@ class Store(context: Context) {
         val next = f(_settings.value)
         _settings.value = next
         sp.edit().putString("settings", Json.write(
-            mapOf("pin" to next.pinHash, "lp2" to next.livePreview, "tmdb" to next.tmdbKey, "hls" to next.preferHls, "acc" to next.accent)
+            mapOf("pin" to next.pinHash, "lp2" to next.livePreview, "tmdb" to next.tmdbKey, "acc" to next.accent,
+                "buf" to next.bufferLevel, "fmt" to next.streamFormat, "swdec" to next.softwareDecoder,
+                "shape" to next.pictureShape, "last" to next.startOnLastChannel, "ts" to next.timeshift)
         )).apply()
     }
 
@@ -380,10 +391,111 @@ class Store(context: Context) {
                 pinHash = o.text("pin"),
                 livePreview = o.bool("lp2"),
                 tmdbKey = o.text("tmdb"),
-                preferHls = o.bool("hls"),
                 accent = o.long("acc") ?: 0xFF4C8DFF,
+                bufferLevel = (o.int("buf") ?: 1).coerceIn(0, 2),
+                streamFormat = o.text("fmt")?.takeIf { it in setOf("auto", "ts", "hls") } ?: if (o.bool("hls")) "hls" else "auto",
+                softwareDecoder = o.bool("swdec"),
+                pictureShape = o.text("shape")?.takeIf { it in setOf("fit", "fill", "stretch") } ?: "fit",
+                startOnLastChannel = o.bool("last"),
+                timeshift = o.raw("ts")?.let { o.bool("ts") } ?: true,
             )
         }.getOrDefault(AppSettings())
+    }
+
+    // ---------- per-channel stream format (remembered when "auto" had to switch) ----------
+
+    fun channelFormat(channelKey: String): String? {
+        val src = _activeId.value ?: return null
+        return sp.getString("fmt_${src}_$channelKey", null)
+    }
+
+    fun setChannelFormat(channelKey: String, format: String?) {
+        val src = _activeId.value ?: return
+        sp.edit().apply { if (format == null) remove("fmt_${src}_$channelKey") else putString("fmt_${src}_$channelKey", format) }.apply()
+    }
+
+    fun clearChannelFormats() {
+        val src = _activeId.value ?: return
+        val e = sp.edit()
+        sp.all.keys.filter { it.startsWith("fmt_${src}_") }.forEach { e.remove(it) }
+        e.apply()
+    }
+
+    // ---------- backup & restore ----------
+
+    private fun fingerprint(s: Source): String = when (s) {
+        is Source.Xtream -> lumen.core.M3uParser.stableKey(lumen.core.XtreamClient.normalizeServer(s.server).lowercase() + "|" + s.username)
+        is Source.M3u -> lumen.core.M3uParser.stableKey(s.playlistUrl)
+    }
+
+    /** Everything a person set up, as JSON. The login is included only when asked. */
+    fun exportBackup(includeLogin: Boolean): String {
+        val src = _sources.value.map { s ->
+            val keys = sp.all.keys.filter { it.startsWith("prefs_${s.id}_") || it == "shared_${s.id}" || it.startsWith("fmt_${s.id}_") }
+            val data = keys.associateWith { k -> sp.getString(k, null) }
+            val m = linkedMapOf<String, Any?>("id" to s.id, "fp" to fingerprint(s), "label" to s.label, "data" to data)
+            if (includeLogin) m["login"] = when (s) {
+                is Source.Xtream -> mapOf("t" to "x", "server" to s.server, "u" to s.username, "p" to s.password)
+                is Source.M3u -> mapOf("t" to "m", "url" to s.playlistUrl, "epg" to s.epgUrl)
+            }
+            m
+        }
+        return Json.write(linkedMapOf(
+            "app" to "KASH TV", "v" to 1, "at" to System.currentTimeMillis(),
+            "profiles" to _profiles.value.map { mapOf("id" to it.id, "n" to it.name, "c" to it.color) },
+            "settings" to sp.getString("settings", null),
+            "sources" to src,
+        ))
+    }
+
+    /**
+     * Restores a backup. Favorites/lists are matched to providers by server + username,
+     * so it works after signing in again on a new install. Returns a short summary.
+     */
+    fun importBackup(json: String): String {
+        val o = Json.parseObject(json)
+        if (o.text("app") != "KASH TV") throw IllegalArgumentException("That isn't a KASH TV backup file.")
+        val e = sp.edit()
+        val profiles = o.objList("profiles").mapNotNull { p ->
+            Profile(p.text("id") ?: return@mapNotNull null, p.text("n") ?: "Profile", p.long("c") ?: PROFILE_COLORS[0])
+        }
+        if (profiles.isNotEmpty()) e.putString("profiles", Json.write(profiles.map { mapOf("id" to it.id, "n" to it.name, "c" to it.color) }))
+        o.text("settings")?.let { e.putString("settings", it) }
+        var matched = 0
+        var added = 0
+        val current = _sources.value.toMutableList()
+        for (b in o.objList("sources")) {
+            val fp = b.text("fp")
+            val oldId = b.text("id") ?: continue
+            var target = current.firstOrNull { fingerprint(it) == fp }
+            if (target == null && current.size == 1 && o.objList("sources").size == 1) target = current[0]
+            if (target == null) {
+                val l = b.obj("login") ?: continue
+                target = when (l.text("t")) {
+                    "x" -> Source.Xtream(oldId, b.text("label") ?: "IPTV", l.text("server") ?: continue, l.str("u") ?: "", l.str("p") ?: "")
+                    "m" -> Source.M3u(oldId, b.text("label") ?: "Playlist", l.text("url") ?: continue, l.text("epg"))
+                    else -> continue
+                }
+                current.add(target); added++
+            } else matched++
+            val data = b.obj("data")?.map ?: continue
+            for ((k, v) in data) {
+                val key = k.toString().replaceFirst("_${oldId}", "_${target.id}")
+                if (v is String) e.putString(key, v)
+            }
+        }
+        e.commit()
+        if (added > 0) writeSources(current)
+        _profiles.value = readProfiles()
+        _settings.value = readSettings()
+        if (_profiles.value.none { it.id == _profileId.value }) _profileId.value = _profiles.value.first().id
+        if (_activeId.value == null) _activeId.value = current.firstOrNull()?.id
+        _prefs.value = readPrefs(_activeId.value)
+        return "Restored ${profiles.size} profile(s)" + when {
+            added > 0 -> " and your login"
+            matched > 0 -> " for your provider"
+            else -> ". Sign in to your provider, then restore again to bring back favorites and lists"
+        } + "."
     }
 
     fun checkPin(pin: String) = _settings.value.pinHash == null || _settings.value.pinHash == hash(pin)

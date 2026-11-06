@@ -120,6 +120,50 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
             }
         }
 
+        item { Heading("Playback") }
+        item {
+            Choice("Buffer size (bigger rides out hiccups; channels start a moment slower)",
+                listOf("Normal", "Large", "Maximum")[settings.bufferLevel]) {
+                vm.store.updateSettings { it.copy(bufferLevel = (it.bufferLevel + 1) % 3) }
+            }
+        }
+        item {
+            Choice("Stream format", when (settings.streamFormat) { "ts" -> "Always TS"; "hls" -> "Always HLS"; else -> "Auto (switch if a channel freezes)" }) {
+                vm.store.updateSettings { it.copy(streamFormat = when (it.streamFormat) { "auto" -> "ts"; "ts" -> "hls"; else -> "auto" }) }
+            }
+        }
+        item {
+            Toggle("Live pause & rewind (keeps up to an hour of the channel you're watching)", settings.timeshift) {
+                vm.store.updateSettings { it.copy(timeshift = !it.timeshift) }
+            }
+        }
+        item {
+            Choice("Video decoder", if (settings.softwareDecoder) "Prefer software" else "Hardware (recommended)") {
+                vm.store.updateSettings { it.copy(softwareDecoder = !it.softwareDecoder) }
+            }
+        }
+        item {
+            Choice("Picture shape", when (settings.pictureShape) { "fill" -> "Fill (crop edges)"; "stretch" -> "Stretch"; else -> "Fit" }) {
+                vm.store.updateSettings { it.copy(pictureShape = when (it.pictureShape) { "fit" -> "fill"; "fill" -> "stretch"; else -> "fit" }) }
+            }
+        }
+        item {
+            Toggle("Open straight into the last channel you watched", settings.startOnLastChannel) {
+                vm.store.updateSettings { it.copy(startOnLastChannel = !it.startOnLastChannel) }
+            }
+        }
+        item {
+            Text("Changes apply the next time a channel opens. If a channel was switched to the other format automatically, " +
+                "you can undo all of those here:", style = T.meta)
+        }
+        item { PillButton("Reset per-channel format choices", onClick = { vm.store.clearChannelFormats(); vm.showBanner("Reset") }) }
+
+        item { Heading("Backup & your phone") }
+        item {
+            Text("Back up or restore profiles, favorites and lists, or type your provider login, from a phone or computer on your Wi-Fi.", style = T.body)
+        }
+        item { PillButton("Use your phone…", onClick = { vm.go(Route.PhoneLink) }) }
+
         item { Heading("Home screen") }
         item {
             Toggle("Play a muted video preview on the Home banner (uses one of your streams)", settings.livePreview) {
@@ -228,6 +272,16 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
 @Composable
 private fun Heading(text: String) {
     Text(text, style = T.h2, modifier = Modifier.padding(top = 14.dp))
+}
+
+@Composable
+private fun Choice(label: String, value: String, onClick: () -> Unit) {
+    Focusable(onClick = onClick, modifier = Modifier.width(520.dp).height(40.dp), color = C.Surface, focusedColor = C.Raised, scale = 1.01f) {
+        Row(Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = T.title, modifier = Modifier.weight(1f))
+            Text(value, style = T.title.copy(color = LocalAccent.current))
+        }
+    }
 }
 
 @Composable

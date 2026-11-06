@@ -58,12 +58,17 @@ fun rememberNow(periodMs: Long = 30_000): State<Long> = produceState(System.curr
 
 /** A Media3 PlayerView that never takes remote focus. */
 @Composable
-fun VideoSurface(player: Player, modifier: Modifier = Modifier, zoom: Boolean = false) {
+fun VideoSurface(player: Player, modifier: Modifier = Modifier, zoom: Boolean = false, shape: String? = null) {
+    val mode = when (shape) {
+        "fill" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        "stretch" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+        else -> if (zoom) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+    }
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
                 useController = false
-                resizeMode = if (zoom) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+                resizeMode = mode
                 setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                 setKeepContentOnPlayerReset(true)
                 isFocusable = false
@@ -72,7 +77,7 @@ fun VideoSurface(player: Player, modifier: Modifier = Modifier, zoom: Boolean = 
                 this.player = player
             }
         },
-        update = { it.player = player },
+        update = { it.player = player; it.resizeMode = mode },
         modifier = modifier,
     )
 }

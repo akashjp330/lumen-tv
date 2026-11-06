@@ -53,6 +53,7 @@ fun LoginScreen(vm: MainViewModel, firstRun: Boolean) {
     var epg by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var phone by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val first = remember { FocusRequester() }
 
@@ -91,7 +92,7 @@ fun LoginScreen(vm: MainViewModel, firstRun: Boolean) {
         ) {
             Text(if (firstRun) "Welcome" else "Add a provider", style = T.h1)
             Text(
-                "Enter the details your IPTV provider gave you. Typing is easier with the keyboard in the Fire TV phone app.",
+                "Enter the details your IPTV provider gave you, or sign in from your phone, which is much easier than typing with the remote.",
                 style = T.body,
             )
             Spacer(Modifier.height(4.dp))
@@ -114,7 +115,9 @@ fun LoginScreen(vm: MainViewModel, firstRun: Boolean) {
                 PillButton(if (busy) "Connecting…" else "Connect", onClick = { if (!busy) connect() }, primary = true)
                 if (!firstRun) PillButton("Cancel", onClick = { vm.back() })
                 if (busy) CircularProgressIndicator(color = LocalAccent.current, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                PillButton(if (phone) "Hide phone sign-in" else "Sign in from my phone", onClick = { phone = !phone })
             }
+            if (phone) PhoneLinkPanel(vm, Modifier.padding(top = 8.dp))
         }
     }
     LaunchedEffect(Unit) { runCatching { first.requestFocus() } }

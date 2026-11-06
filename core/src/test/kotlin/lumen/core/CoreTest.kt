@@ -222,6 +222,19 @@ class CoreTest {
         assertEquals("Sunday Night Football", StoreGuide.build(cat.channels, store, mapOf("101" to "SportsOne.us")).at("101", nowMs)?.title)
     }
 
+    @Test fun alternateVersionsOfAChannel() {
+        fun c(k: String, n: String, num: Int) = Channel(k, num, n, null, "1", null, "http://h/live/u/p/$k.ts")
+        val all = listOf(
+            c("1", "USA ESPN SD", 387), c("2", "USA ESPN HD", 388), c("3", "USA ESPN 4K", 389), c("4", "USA ESPN2 HD", 390),
+            c("5", "USA AMC East LHD", 1), c("6", "USA AMC West", 2), c("7", "USA A&E UHD*", 3), c("8", "USA A&E", 4),
+        )
+        assertEquals(listOf("3", "2"), Alternates.of(all[0], all).map { it.key }) // best first; ESPN2 isn't ESPN
+        assertEquals(listOf("6"), Alternates.of(all[4], all).map { it.key })
+        assertEquals(listOf("8"), Alternates.of(all[6], all).map { it.key })
+        assertEquals(4, Alternates.rank("USA A&E UHD*")); assertEquals(0, Alternates.rank("USA ESPN SD"))
+        assertEquals(3, Alternates.index(all).size)
+    }
+
     @Test fun nameNormalization() {
         assertEquals("espn", EpgMatcher.normalize("US: ESPN HD (East)"))
         assertEquals("sportsone", EpgMatcher.normalize("|US| Sports One FHD"))

@@ -346,3 +346,39 @@ fun ProfileMenu(vm: MainViewModel) {
     }
     LaunchedEffect(Unit) { delay(60); runCatching { first.requestFocus() } }
 }
+
+/** Shows the address to open on a phone, while the TV serves the backup / sign-in page. */
+@Composable
+fun PhoneLinkPanel(vm: MainViewModel, modifier: Modifier = Modifier) {
+    val link = remember {
+        tv.lumen.app.data.PhoneLink(vm.store, onRestored = { vm.afterRestore() }, onLogin = { s, u, p -> vm.loginFromPhone(s, u, p) })
+    }
+    var address by remember { mutableStateOf<String?>(null) }
+    var tried by remember { mutableStateOf(false) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        address = link.start(); tried = true
+        onDispose { link.stop() }
+    }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        when {
+            address != null -> {
+                Text("On a phone or computer connected to the same Wi-Fi, open:", style = T.body)
+                Text(address!!.removePrefix("http://"), style = T.hero.copy(color = LocalAccent.current))
+                Text("You'll be able to download or restore a backup, and type your provider login. " +
+                    "This page only works while this screen is open.", style = T.meta)
+            }
+            tried -> Text("This TV doesn't seem to be on a home network right now, so the phone page can't start.", style = T.body.copy(color = C.Live))
+        }
+    }
+}
+
+@Composable
+fun PhoneLinkScreen(vm: MainViewModel) {
+    val first = remember { FocusRequester() }
+    Column(Modifier.fillMaxSize().padding(start = 32.dp, top = 24.dp, end = 32.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Text("Use your phone", style = T.h1)
+        PhoneLinkPanel(vm)
+        PillButton("Done", onClick = { vm.back() }, modifier = Modifier.focusRequester(first))
+    }
+    LaunchedEffect(Unit) { delay(80); runCatching { first.requestFocus() } }
+}

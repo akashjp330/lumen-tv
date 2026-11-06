@@ -63,18 +63,35 @@ import tv.lumen.app.MainViewModel
 import tv.lumen.app.PlayRequest
 import tv.lumen.app.Route
 import tv.lumen.app.player.PlayerFactory
+import tv.lumen.app.data.DiagLog
+import lumen.core.Alternates
+import tv.lumen.app.player.StreamUrls
+import tv.lumen.app.player.LiveController
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 
-private enum class PlayerDialog { TRACKS, FIX_GUIDE }
+private enum class PlayerDialog { TRACKS, FIX_GUIDE, VERSIONS }
 
 @Composable
 fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
     val ctx = LocalContext.current
     val repo by vm.repo.state.collectAsStateWithLifecycle()
     val prefs by vm.store.prefs.collectAsStateWithLifecycle()
+    val settings by vm.store.settings.collectAsStateWithLifecycle()
     val now by rememberNow(15_000)
 
     var req by remember { mutableStateOf(initial) }
-    val player = remember { PlayerFactory.create(ctx) }
+    val player = remember {
+        val s = vm.store.settings.value
+        PlayerFactory.create(ctx, bufferLevel = s.bufferLevel, softwareDecoder = s.softwareDecoder)
+    }
+    val live = remember { LiveController(ctx, player) }
+    var behind by remember { mutableLongStateOf(0L) }
+    var rewindable by remember { mutableLongStateOf(0L) }
+    var showInfo by remember { mutableStateOf(false) }
+    var dropped by remember { mutableIntStateOf(0) }
+    var switchedFormat by remember { mutableStateOf(false) }
+    var offeredOther by remember { mutableStateOf(false) }
     var previousKey by remember {
         mutableStateOf(prefs.recent.firstOrNull { it != initial.channelKey })
     }
@@ -85,6 +102,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
     var playing by remember { mutableStateOf(false) }
     var buffering by remember { mutableStateOf(true) }
     var failed by remember { mutableStateOf<String?>(null) }
+    var troubleSignal by remember { mutableIntStateOf(0) }
     var position by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
 
@@ -98,6 +116,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
     fun channelOf(key: String?): Channel? =
         key?.let { k -> visible.firstOrNull { it.key == k } ?: allChannels.firstOrNull { it.key == k } }
     val channel = channelOf(req.channelKey)
+    val versions = remember(channel?.key, visible) { channel?.let { lumen.core.Alternates.of(it, visible) }.orEmpty() }
 
     // ---------- player lifecycle ----------
     val latestReq by rememberUpdatedState(req)
@@ -112,6 +131,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 }
             }
             override fun onPlayerError(error: PlaybackException) {
+                if (latestReq.isLive && live.noteTrouble()) troubleSignal++
                 failed = when (error.errorCode) {
                     PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
                         "The provider refused the stream. You may be at your connection limit, or the channel is down."
@@ -124,18 +144,43 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
             }
         }
         player.addListener(listener)
+        val analytics = object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onDroppedVideoFrames(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
+                dropped += droppedFrames
+            }
+        }
+        player.addAnalyticsListener(analytics)
         onDispose {
             val r = latestReq
             if (!r.isLive) vm.saveProgress(r, player.currentPosition, player.duration)
             player.removeListener(listener)
+            live.stop()
             player.release()
         }
     }
 
+    /** The URL in the format this channel should use (TS unless it's been switched or set to HLS). */
+    fun liveUrlFor(r: PlayRequest): String {
+        val s = vm.store.settings.value
+        if (!StreamUrls.canSwitch(r.url)) return r.url
+        val fmt = when (s.streamFormat) {
+            "auto" -> r.channelKey?.let { vm.store.channelFormat(it) } ?: "ts"
+            else -> s.streamFormat
+        }
+        return StreamUrls.withFormat(r.url, fmt)
+    }
+
     LaunchedEffect(req.url) {
         failed = null
-        PlayerFactory.play(player, req.url, req.startPositionMs)
+        dropped = 0; switchedFormat = false; offeredOther = false
+        if (req.isLive) {
+            live.start(liveUrlFor(req), vm.store.settings.value.timeshift)
+        } else {
+            live.stop()
+            PlayerFactory.play(player, req.url, req.startPositionMs)
+        }
     }
+
 
     // position ticker + periodic progress save
     LaunchedEffect(Unit) {
@@ -149,6 +194,19 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 duration = player.duration.takeIf { it > 0 } ?: 0
                 val r = latestReq
                 if (++n % 15 == 0 && !r.isLive) vm.saveProgress(r, position, duration)
+                if (r.isLive) {
+                    if (live.tick()) troubleSignal++
+                    behind = live.behindLive()
+                    rewindable = live.rewindable()
+                }
+                // Sleep timer
+                val sleepAt = vm.sleepAtMs
+                if (sleepAt > 0 && System.currentTimeMillis() >= sleepAt) {
+                    vm.sleepAtMs = 0
+                    player.pause()
+                    vm.back()
+                    vm.showBanner("Sleep timer: playback stopped.")
+                }
                 // Count live viewing time per channel for "Most watched".
                 if (r.isLive && r.channelKey != liveKey) {
                     liveKey?.let { vm.store.addWatchTime(it, liveSec) }
@@ -197,6 +255,27 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
         switchTo(list[(i + delta).mod(list.size)])
     }
 
+    // When a channel keeps freezing: first try the other stream format, then offer another version.
+    LaunchedEffect(troubleSignal) {
+        if (troubleSignal == 0 || !req.isLive) return@LaunchedEffect
+        val ch = channel ?: return@LaunchedEffect
+        val s = vm.store.settings.value
+        if (s.streamFormat == "auto" && StreamUrls.canSwitch(live.url) && !switchedFormat) {
+            val other = if (live.format == "ts") "hls" else "ts"
+            switchedFormat = true
+            vm.store.setChannelFormat(ch.key, other)
+            DiagLog.log("${ch.name}: switching to ${other.uppercase()} after repeated freezes")
+            live.start(StreamUrls.withFormat(live.url, other), s.timeshift)
+            vm.showBanner("${ch.name} kept freezing, so it's now using the ${if (other == "hls") "HLS" else "TS"} stream format.")
+        } else if (!offeredOther) {
+            offeredOther = true
+            val alt = Alternates.of(ch, visible).firstOrNull()
+            if (alt != null) vm.offer("${ch.name} keeps freezing. Try ${alt.name}?", "Switch") { switchTo(alt) }
+            else vm.showBanner("${ch.name} keeps freezing. The provider's stream may be having trouble.")
+        }
+        live.clearTrouble()
+    }
+
     LaunchedEffect(digits) {
         if (digits.isEmpty()) return@LaunchedEffect
         delay(1_600)
@@ -218,8 +297,14 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
             AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { if (down) togglePlay(); return true }
             AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> { if (down) player.play(); return true }
             AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> { if (down) player.pause(); return true }
-            AndroidKeyEvent.KEYCODE_MEDIA_REWIND -> { if (down && !req.isLive) player.seekTo((player.currentPosition - 30_000).coerceAtLeast(0)); return true }
-            AndroidKeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { if (down && !req.isLive) player.seekTo(player.currentPosition + 30_000); return true }
+            AndroidKeyEvent.KEYCODE_MEDIA_REWIND -> {
+                if (down) { if (req.isLive) { if (!live.seekBy(-30)) vm.showBanner("Rewind needs live pause turned on in Settings") } else player.seekTo((player.currentPosition - 30_000).coerceAtLeast(0)) }
+                return true
+            }
+            AndroidKeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                if (down) { if (req.isLive) live.seekBy(30) else player.seekTo(player.currentPosition + 30_000) }
+                return true
+            }
             AndroidKeyEvent.KEYCODE_CHANNEL_UP -> { if (down && req.isLive) zap(+1); return true }
             AndroidKeyEvent.KEYCODE_CHANNEL_DOWN -> { if (down && req.isLive) zap(-1); return true }
         }
@@ -260,7 +345,8 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
             .focusRequester(rootFr)
             .focusable()
     ) {
-        VideoSurface(player, Modifier.fillMaxSize())
+        VideoSurface(player, Modifier.fillMaxSize(), shape = settings.pictureShape)
+        if (showInfo) StreamInfo(player, live, dropped, Modifier.align(Alignment.TopEnd).padding(24.dp))
 
         if (buffering && failed == null) {
             CircularProgressIndicator(color = Color.White, modifier = Modifier.align(Alignment.Center).size(40.dp))
@@ -281,17 +367,40 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
             )
             Column(Modifier.align(Alignment.BottomStart).padding(start = 40.dp, end = 40.dp, bottom = 28.dp).fillMaxWidth()) {
                 if (req.isLive && channel != null) {
-                    LiveInfo(channel, repo.guide.at(channel.key, now), repo.guide.next(channel.key, now), now)
+                    LiveInfo(channel, repo.guide.at(channel.key, now), repo.guide.next(channel.key, now), now, behind)
                 } else {
                     VodInfo(req, position, duration)
                 }
                 Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val sleepLabel = vm.sleepAtMs.let { at ->
+                    if (at <= 0) "Sleep: Off" else "Sleep: ${((at - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)} min"
+                }
+                fun cycleSleep() {
+                    val left = if (vm.sleepAtMs > 0) (vm.sleepAtMs - System.currentTimeMillis()) / 60_000 else 0
+                    val next = listOf(30L, 60L, 90L, 120L).firstOrNull { it > left + 1 } ?: 0L
+                    vm.sleepAtMs = if (next == 0L) 0 else System.currentTimeMillis() + next * 60_000
+                    vm.showBanner(if (next == 0L) "Sleep timer off" else "Playback will stop in $next minutes")
+                }
+                val shapeLabel = when (settings.pictureShape) { "fill" -> "Picture: Fill"; "stretch" -> "Picture: Stretch"; else -> "Picture: Fit" }
+                fun cycleShape() = vm.store.updateSettings {
+                    it.copy(pictureShape = when (it.pictureShape) { "fit" -> "fill"; "fill" -> "stretch"; else -> "fit" })
+                }
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     if (req.isLive && channel != null) {
-                        val fav = channel.key in prefs.favorites
-                        PillButton(if (fav) "★ Favorite" else "☆ Add favorite", onClick = { vm.store.toggleFavorite(channel.key) },
+                        PillButton(if (playing) "Pause" else "Play", onClick = { togglePlay() }, primary = true,
                             modifier = Modifier.focusRequester(firstButton))
+                        if (live.usingBuffer) {
+                            PillButton("−30 s", onClick = { if (!live.seekBy(-30)) vm.showBanner("Nothing saved to rewind yet") })
+                            if (behind > 0) PillButton("+30 s", onClick = { live.seekBy(30) })
+                            if (behind > 5) PillButton("Go live", onClick = { live.goLive() })
+                        }
+                        val fav = channel.key in prefs.favorites
+                        PillButton(if (fav) "★ Favorite" else "☆ Add favorite", onClick = { vm.store.toggleFavorite(channel.key) })
                         PillButton("Add to a list…", onClick = { vm.openChannelMenu(channel) })
+                        if (versions.isNotEmpty()) PillButton("Other versions (${versions.size})", onClick = { dialog = PlayerDialog.VERSIONS })
                         val p = repo.guide.at(channel.key, now)
                         if (p != null && channel.catchupDays > 0 && Catchup.isAvailable(channel, p, now)) {
                             PillButton("Start over", onClick = { vm.playCatchup(channel, p) })
@@ -303,6 +412,9 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                             vm.go(Route.Multiview(listOf(channel.key) + others))
                         })
                         PillButton("Fix guide match", onClick = { dialog = PlayerDialog.FIX_GUIDE })
+                        PillButton(sleepLabel, onClick = { cycleSleep() })
+                        PillButton(shapeLabel, onClick = { cycleShape() })
+                        PillButton(if (showInfo) "Hide stream info" else "Stream info", onClick = { showInfo = !showInfo })
                     } else {
                         PillButton(if (playing) "Pause" else "Play", onClick = { togglePlay() }, primary = true,
                             modifier = Modifier.focusRequester(firstButton))
@@ -313,12 +425,16 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                         if (req.kind == PlayRequest.Kind.CATCHUP) {
                             channel?.let { ch -> PillButton("Go live", onClick = { vm.playChannel(ch, replace = true) }) }
                         }
+                        PillButton(sleepLabel, onClick = { cycleSleep() })
+                        PillButton(shapeLabel, onClick = { cycleShape() })
+                        PillButton(if (showInfo) "Hide stream info" else "Stream info", onClick = { showInfo = !showInfo })
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
                     if (req.isLive) "▲ ▼ change channel" + (if (req.zapKeys != null) " in this list" else "") +
-                        "  ·  ◀ previous channel  ·  0–9 channel number  ·  ≡ lists  ·  Back hides this"
+                        "  ·  ◀ previous channel  ·  0–9 channel number" +
+                        (if (live.usingBuffer) "  ·  ⏪ ⏩ 30 s" else "") + "  ·  ≡ lists  ·  Back hides this"
                     else "◀ back 10 s  ·  ▶ ahead 30 s  ·  OK pause  ·  Back hides this",
                     style = T.meta,
                 )
@@ -328,20 +444,25 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
         when (dialog) {
             PlayerDialog.TRACKS -> TracksDialog(player) { dialog = null }
             PlayerDialog.FIX_GUIDE -> channel?.let { ch -> FixGuideDialog(vm, ch, repo.epgChannels) { dialog = null } }
+            PlayerDialog.VERSIONS -> VersionsDialog(versions, now, repo.guide, onPick = { dialog = null; switchTo(it) }) { dialog = null }
             null -> Unit
         }
     }
 }
 
 @Composable
-private fun LiveInfo(ch: Channel, p: lumen.core.Program?, next: lumen.core.Program?, now: Long) {
+private fun LiveInfo(ch: Channel, p: lumen.core.Program?, next: lumen.core.Program?, now: Long, behind: Long) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         ChannelLogo(ch, Modifier.size(72.dp, 44.dp).clip(RoundedCornerShape(8.dp)).background(C.Surface2), monogramSize = 32.dp)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LiveChip()
+                if (behind > 5) {
+                    Text("${fmtPosition(behind * 1000)} BEHIND LIVE", style = T.chip.copy(color = C.Ink),
+                        modifier = Modifier.clip(RoundedCornerShape(3.dp)).background(LocalAccent.current).padding(horizontal = 6.dp, vertical = 2.dp))
+                } else LiveChip()
                 Text("${ch.number}  ${ch.name}", style = T.title.copy(color = C.Text2))
+                QualityBadge(ch.name)
             }
             OneLine(p?.title ?: ch.name, T.h1)
             if (p != null) {
@@ -467,4 +588,72 @@ private fun FixGuideDialog(vm: MainViewModel, ch: Channel, epgChannels: List<lum
         }
     }
     LaunchedEffect(Unit) { delay(50); runCatching { fieldFr.requestFocus() } }
+}
+
+
+@Composable
+private fun VersionsDialog(
+    versions: List<Channel>,
+    now: Long,
+    guide: lumen.core.Guide,
+    onPick: (Channel) -> Unit,
+    onClose: () -> Unit,
+) {
+    val first = remember { FocusRequester() }
+    DialogFrame("Other versions of this channel") {
+        LazyColumn(Modifier.height(300.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(versions.size) { i ->
+                val ch = versions[i]
+                val p = guide.at(ch.key, now)
+                Focusable(
+                    onClick = { onPick(ch) },
+                    modifier = (if (i == 0) Modifier.focusRequester(first) else Modifier).fillMaxWidth().height(44.dp),
+                    color = C.Surface2, focusedColor = C.Text, scale = 1.02f, ring = false,
+                ) { f ->
+                    Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            OneLine("${ch.number}  ${ch.name}", T.title.copy(color = if (f) C.Ink else C.Text))
+                            p?.let { OneLine(it.title, T.meta.copy(color = if (f) C.Ink else C.Muted)) }
+                        }
+                        QualityBadge(ch.name)
+                    }
+                }
+            }
+        }
+    }
+    LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
+}
+
+/** Resolution, format, bitrate and buffer health, to tell a bad channel from a bad connection. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun StreamInfo(player: androidx.media3.exoplayer.ExoPlayer, live: LiveController, dropped: Int, modifier: Modifier) {
+    val ctx = LocalContext.current
+    val tick by rememberNow(1_000)
+    val v = player.videoFormat
+    val a = player.audioFormat
+    val meter = remember { androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(ctx) }
+    val buf = live.buffer
+    val lines = buildList {
+        add("Video  " + (v?.let { "${it.width}×${it.height}" + (if (it.frameRate > 0) " · ${it.frameRate.toInt()} fps" else "") + " · ${it.sampleMimeType?.substringAfter('/') ?: "?"}" } ?: "—"))
+        add("Audio  " + (a?.let { "${it.sampleMimeType?.substringAfter('/') ?: "?"} · ${it.channelCount} ch" } ?: "—"))
+        if (buf != null) {
+            val kbps = (buf.byteRate() * 8 / 1000).toInt()
+            add("Stream  TS · ${if (kbps > 0) "%.1f Mbps".format(kbps / 1000.0) else "measuring…"}")
+            add("Live buffer  ${fmtPosition(buf.heldSeconds() * 1000)} saved · ${fmtPosition(live.behindLive() * 1000)} behind")
+            add("Reconnects  ${buf.reconnects}" + if (buf.secondsSinceData() > 3) " · waiting for data ${buf.secondsSinceData()} s" else "")
+        } else {
+            add("Stream  ${live.format.uppercase()} · direct")
+            add("Network  " + "%.1f Mbps".format(meter.bitrateEstimate / 1_000_000.0))
+        }
+        add("Player buffer  ${"%.1f".format(player.totalBufferedDuration / 1000.0)} s · dropped frames $dropped")
+        add("Freezes fixed  ${live.stalls}")
+    }
+    Column(modifier.clip(RoundedCornerShape(10.dp)).background(Color(0xD90B0D12)).padding(14.dp)) {
+        Text("Stream info", style = T.title)
+        Spacer(Modifier.height(4.dp))
+        lines.forEach { Text(it, style = T.meta.copy(color = C.Text2)) }
+        if (tick < 0) Text("") // re-read every second
+    }
 }

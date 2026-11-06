@@ -78,6 +78,7 @@ fun AppRoot(vm: MainViewModel, onExit: () -> Unit) {
 @Composable
 private fun MainArea(vm: MainViewModel, repo: RepoState) {
     val route = vm.current
+    LaunchedEffect(repo.catalog != null) { repo.catalog?.let { vm.maybeStartLastChannel(it) } }
     key(route) {
         when (route) {
             is Route.Player -> PlayerScreen(vm, route.req)
@@ -96,6 +97,7 @@ private fun MainArea(vm: MainViewModel, repo: RepoState) {
                         Route.ManageCategories -> ManageCategoriesScreen(vm, repo)
                         Route.AddSource -> LoginScreen(vm, firstRun = false)
                         Route.ManageLists -> ManageListsScreen(vm, repo)
+                        Route.PhoneLink -> PhoneLinkScreen(vm)
                         is Route.MovieDetail -> MovieDetailScreen(vm, route.movie)
                         is Route.SeriesDetail -> SeriesDetailScreen(vm, route.series)
                         else -> Unit
@@ -123,7 +125,7 @@ private fun NavRail(vm: MainViewModel, current: Route) {
     val section = when (current) {
         is Route.MovieDetail -> Route.Movies
         is Route.SeriesDetail -> Route.Series
-        Route.Diagnostics, Route.ManageCategories, Route.AddSource, Route.ManageLists -> Route.Settings
+        Route.Diagnostics, Route.ManageCategories, Route.AddSource, Route.ManageLists, Route.PhoneLink -> Route.Settings
         else -> current
     }
     Column(

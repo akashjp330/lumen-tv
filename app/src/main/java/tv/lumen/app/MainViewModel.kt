@@ -36,6 +36,7 @@ sealed interface Route {
     data object ManageCategories : Route
     data object AddSource : Route
     data object ManageLists : Route
+    data object PhoneLink : Route
 }
 
 /** What the player should play. Live requests carry the channel so up/down can zap. */
@@ -238,4 +239,53 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissBanner() { banner = null }
+
+    /** A banner with a button, e.g. "ESPN HD keeps freezing — switch to ESPN SD?" */
+    fun offer(text: String, actionLabel: String, action: () -> Unit) {
+        banner = Banner(text, actionLabel) { banner = null; action() }
+    }
+
+    /** Sign-in typed on a phone (called from the phone page's thread). */
+    fun loginFromPhone(server: String, user: String, pass: String): String {
+        if (server.isBlank() || user.isBlank() || pass.isBlank()) return "Fill in the server, username and password."
+        val source = lumen.core.Source.Xtream(java.util.UUID.randomUUID().toString().take(8), "My IPTV", server.trim(), user.trim(), pass)
+        return try {
+            val acct = kotlinx.coroutines.runBlocking { repo.verify(source) }
+            if (acct != null && !acct.isActive) "The login worked, but the account status is \"${acct.status}\"."
+            else {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    repo.addSource(source)
+                    stack.clear(); stack.add(Route.Home)
+                }
+                "Signed in. Your channels are loading on the TV."
+            }
+        } catch (e: Exception) {
+            tv.lumen.app.data.Repository.friendly(e)
+        }
+    }
+
+    /** After a backup is restored from a phone: reload everything. */
+    fun afterRestore() {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            focusMemory.clear()
+            stack.clear(); stack.add(Route.Home)
+            repo.start()
+            showBanner("Backup restored")
+        }
+    }
+
+    private var startedLastChannel = false
+
+    /** "Open straight into the last channel": once per app launch. */
+    fun maybeStartLastChannel(catalog: lumen.core.Catalog) {
+        if (startedLastChannel) return
+        startedLastChannel = true
+        if (!store.settings.value.startOnLastChannel || current != Route.Home || stack.size > 1) return
+        val key = store.prefs.value.recent.firstOrNull() ?: return
+        val ch = catalog.channels.firstOrNull { it.key == key } ?: return
+        playChannel(ch)
+    }
+
+    /** Sleep timer: when set, playback stops at this time (ms since epoch). */
+    var sleepAtMs by mutableStateOf(0L)
 }
