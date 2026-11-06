@@ -147,6 +147,8 @@ private class Reconnector(private val player: ExoPlayer) : Player.Listener {
     }
 
     override fun onPlayerError(error: PlaybackException) {
+        // Playback from the live buffer is recovered by LiveController (it resumes at the right spot).
+        if (player.currentMediaItem?.localConfiguration?.uri?.scheme == LiveBuffer.SCHEME) return
         if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
             player.seekToDefaultPosition()
             player.prepare()

@@ -12,6 +12,32 @@ import java.io.File
  * trouble so the screen can switch format or offer another version of the channel.
  */
 class LiveController(context: Context, private val player: ExoPlayer) {
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var bufferStartedAt = 0L
+    private var bufferErrors = 0
+
+    init {
+        player.addListener(object : androidx.media3.common.Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                val b = buffer ?: return
+                bufferErrors++
+                DiagLog.log("Playback from live buffer failed (${error.errorCodeName}); " +
+                    if (bufferErrors >= 3) "switching to direct playback" else "resuming")
+                handler.postDelayed({
+                    if (buffer !== b) return@postDelayed
+                    if (bufferErrors >= 3) fallBackToDirect() else restartAt(b, playbackOffset(b))
+                }, 800)
+            }
+        })
+    }
+
+    /** Plays the channel straight from the provider, without the on-device buffer. */
+    private fun fallBackToDirect() {
+        val u = url
+        stop()
+        PlayerFactory.play(player, u)
+    }
+
     private val dir = File(context.cacheDir, "timeshift").also { it.mkdirs(); LiveBuffer.cleanup(it) }
 
     var buffer: LiveBuffer? = null; private set
@@ -40,6 +66,8 @@ class LiveController(context: Context, private val player: ExoPlayer) {
             val b = LiveBuffer(streamUrl, dir, maxBytes = room.coerceAtMost(MAX_BUFFER))
             buffer = b
             from = 0
+            bufferStartedAt = SystemClock.elapsedRealtime()
+            bufferErrors = 0
             PlayerFactory.play(player, b.playUrl(0))
         } else {
             PlayerFactory.play(player, streamUrl)
@@ -103,6 +131,14 @@ class LiveController(context: Context, private val player: ExoPlayer) {
      * enough to count as trouble; the stream is restarted automatically.
      */
     fun tick(): Boolean {
+        // The buffer couldn't get this channel going: play it directly instead.
+        buffer?.let { b ->
+            if (b.failure != null || (b.written == 0L && SystemClock.elapsedRealtime() - bufferStartedAt > 12_000)) {
+                DiagLog.log("Live buffer got no data; playing the channel directly")
+                fallBackToDirect()
+                return false
+            }
+        }
         if (!player.playWhenReady) { frozenSince = 0; lastPos = player.currentPosition; return false }
         val pos = player.currentPosition
         if (!started) { if (pos > 0 && player.isPlaying) started = true; lastPos = pos; return false }
