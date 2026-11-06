@@ -68,6 +68,11 @@ data class AppSettings(
     val accent: Long = 0xFF4C8DFF,
 )
 
+/** A person using the app. Each has their own favorites, lists, history and resume points. */
+data class Profile(val id: String, val name: String, val color: Long)
+
+val PROFILE_COLORS = listOf(0xFF4C8DFF, 0xFFE5484D, 0xFF35C8A8, 0xFFF5A524, 0xFFB78CFF, 0xFFFF7AB6, 0xFF7DD3FC, 0xFFA3E635)
+
 /** Category keys are namespaced by type so a live and a movie category with id "1" don't collide. */
 fun catKey(type: lumen.core.ContentType, id: String) = "${type.name[0]}:$id"
 
@@ -79,6 +84,15 @@ class Store(context: Context) {
 
     private val _activeId = MutableStateFlow(sp.getString("active_source", null))
     val activeId: StateFlow<String?> = _activeId.asStateFlow()
+
+    private val _profiles = MutableStateFlow(readProfiles())
+    val profiles: StateFlow<List<Profile>> = _profiles.asStateFlow()
+
+    private val _profileId = MutableStateFlow(
+        sp.getString("active_profile", null)?.takeIf { id -> _profiles.value.any { it.id == id } } ?: _profiles.value.first().id
+    )
+    val profileId: StateFlow<String> = _profileId.asStateFlow()
+    val activeProfile: Profile get() = _profiles.value.firstOrNull { it.id == _profileId.value } ?: _profiles.value.first()
 
     private val _prefs = MutableStateFlow(readPrefs(_activeId.value))
     val prefs: StateFlow<UserPrefs> = _prefs.asStateFlow()
@@ -98,7 +112,9 @@ class Store(context: Context) {
 
     fun removeSource(id: String) {
         writeSources(_sources.value.filterNot { it.id == id })
-        sp.edit().remove("prefs_$id").apply()
+        val e = sp.edit().remove("prefs_$id").remove("shared_$id")
+        _profiles.value.forEach { e.remove("prefs_${id}_${it.id}") }
+        e.apply()
         if (_activeId.value == id) setActive(_sources.value.firstOrNull()?.id)
     }
 
@@ -134,13 +150,67 @@ class Store(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    // ---------- per-source prefs ----------
+    // ---------- profiles ----------
+
+    private fun readProfiles(): List<Profile> {
+        val raw = sp.getString("profiles", null)
+        val list = raw?.let {
+            runCatching {
+                Json.parseObjectList(it).mapNotNull { o ->
+                    Profile(o.text("id") ?: return@mapNotNull null, o.text("n") ?: "Profile", o.long("c") ?: PROFILE_COLORS[0])
+                }
+            }.getOrNull()
+        }.orEmpty()
+        return list.ifEmpty { listOf(Profile("p1", "Me", PROFILE_COLORS[0])) }
+    }
+
+    private fun writeProfiles(list: List<Profile>) {
+        sp.edit().putString("profiles", Json.write(list.map { mapOf("id" to it.id, "n" to it.name, "c" to it.color) })).apply()
+        _profiles.value = list
+    }
+
+    fun addProfile(name: String): Profile {
+        val used = _profiles.value.map { it.color }.toSet()
+        val color = PROFILE_COLORS.firstOrNull { it !in used } ?: PROFILE_COLORS[_profiles.value.size % PROFILE_COLORS.size]
+        val p = Profile("p" + System.currentTimeMillis().toString(36), name.trim().ifBlank { "Profile ${_profiles.value.size + 1}" }, color)
+        writeProfiles(_profiles.value + p)
+        return p
+    }
+
+    fun renameProfile(id: String, name: String) =
+        writeProfiles(_profiles.value.map { if (it.id == id) it.copy(name = name.trim().ifBlank { it.name }) else it })
+
+    fun recolorProfile(id: String) = writeProfiles(_profiles.value.map {
+        if (it.id == id) it.copy(color = PROFILE_COLORS[(PROFILE_COLORS.indexOf(it.color) + 1).mod(PROFILE_COLORS.size)]) else it
+    })
+
+    /** Deletes a profile and its favorites/history for every provider. The last profile can't be deleted. */
+    fun deleteProfile(id: String) {
+        if (_profiles.value.size <= 1) return
+        val e = sp.edit()
+        _sources.value.forEach { e.remove("prefs_${it.id}_$id") }
+        e.apply()
+        writeProfiles(_profiles.value.filterNot { it.id == id })
+        if (_profileId.value == id) switchProfile(_profiles.value.first().id)
+    }
+
+    fun switchProfile(id: String) {
+        if (_profiles.value.none { it.id == id }) return
+        sp.edit().putString("active_profile", id).apply()
+        _profileId.value = id
+        _prefs.value = readPrefs(_activeId.value)
+    }
+
+    // ---------- prefs: personal (per profile) + shared (per provider) ----------
 
     fun updatePrefs(f: (UserPrefs) -> UserPrefs) {
         val id = _activeId.value ?: activeSource?.id ?: return
         val next = f(_prefs.value)
         _prefs.value = next
-        sp.edit().putString("prefs_$id", prefsToJson(next)).apply()
+        sp.edit()
+            .putString("prefs_${id}_${_profileId.value}", personalJson(next))
+            .putString("shared_$id", sharedJson(next))
+            .apply()
     }
 
     fun toggleFavorite(channelKey: String) = updatePrefs { p ->
@@ -212,7 +282,25 @@ class Store(context: Context) {
 
     private fun readPrefs(id: String?): UserPrefs {
         if (id == null) return UserPrefs()
-        val raw = sp.getString("prefs_$id", null) ?: return UserPrefs()
+        // Before profiles existed everything lived in "prefs_<source>"; it becomes the
+        // first profile's favorites/history and the shared category settings.
+        sp.getString("prefs_$id", null)?.let { legacy ->
+            val first = "prefs_${id}_${_profiles.value.first().id}"
+            val e = sp.edit()
+            if (!sp.contains(first)) e.putString(first, legacy)
+            if (!sp.contains("shared_$id")) e.putString("shared_$id", legacy)
+            e.remove("prefs_$id").commit()
+        }
+        val personal = parsePrefs(sp.getString("prefs_${id}_${_profileId.value}", null))
+        val shared = parsePrefs(sp.getString("shared_$id", null))
+        return personal.copy(
+            hiddenCats = shared.hiddenCats, lockedCats = shared.lockedCats,
+            hiddenChannels = shared.hiddenChannels, epgOverrides = shared.epgOverrides,
+        )
+    }
+
+    private fun parsePrefs(raw: String?): UserPrefs {
+        if (raw == null) return UserPrefs()
         return runCatching {
             val o = Json.parseObject(raw)
             UserPrefs(
@@ -249,13 +337,19 @@ class Store(context: Context) {
         }.getOrDefault(UserPrefs())
     }
 
-    private fun prefsToJson(p: UserPrefs): String = Json.write(
+    /** Shared by every profile on this provider: what's hidden or locked, and guide fixes. */
+    private fun sharedJson(p: UserPrefs): String = Json.write(
         mapOf(
-            "fav" to p.favorites,
             "hc" to p.hiddenCats.toList(),
             "lc" to p.lockedCats.toList(),
             "hch" to p.hiddenChannels.toList(),
             "epg" to p.epgOverrides,
+        )
+    )
+
+    private fun personalJson(p: UserPrefs): String = Json.write(
+        mapOf(
+            "fav" to p.favorites,
             "rec" to p.recent,
             "prog" to p.progress.values.map {
                 mapOf("id" to it.id, "k" to it.kind, "t" to it.title, "img" to it.image, "url" to it.url,

@@ -56,6 +56,9 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
     }
     var confirmSignOut by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf<String?>(null) }
+    val profiles by vm.store.profiles.collectAsStateWithLifecycle()
+    val currentProfile by vm.store.profileId.collectAsStateWithLifecycle()
     var pinField by remember { mutableStateOf("") }
     var tmdbField by remember { mutableStateOf(settings.tmdbKey ?: "") }
     val first = remember { FocusRequester() }
@@ -145,6 +148,35 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
             }
         }
         item { PillButton("Hide or lock categories", onClick = { vm.go(Route.ManageCategories) }) }
+
+        item { Heading("Profiles") }
+        item {
+            Text("Each person gets their own favorites, lists, recently watched, most watched and resume points. " +
+                "The login, guide and hidden categories are shared.", style = T.body)
+        }
+        items(profiles, key = { "prof_" + it.id }) { p ->
+            var editing by remember(p.id) { mutableStateOf(false) }
+            var newName by remember(p.id) { mutableStateOf(p.name) }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Avatar(p, 30.dp)
+                if (editing) {
+                    OutlinedTextField(
+                        value = newName, onValueChange = { newName = it.take(20) }, singleLine = true, label = { Text("Name") },
+                        colors = fieldColors(), modifier = Modifier.width(220.dp),
+                    )
+                    PillButton("Save", primary = true, onClick = { vm.store.renameProfile(p.id, newName); editing = false })
+                } else {
+                    Text(p.name + if (p.id == currentProfile) "  (watching now)" else "", style = T.title, modifier = Modifier.width(220.dp))
+                    PillButton("Rename", onClick = { editing = true })
+                }
+                PillButton("Change color", onClick = { vm.store.recolorProfile(p.id) })
+                if (p.id != currentProfile) PillButton("Switch to", onClick = { vm.switchProfile(p.id) })
+                if (profiles.size > 1) PillButton(if (confirmDelete == p.id) "Press again to delete" else "Delete", onClick = {
+                    if (confirmDelete == p.id) { vm.store.deleteProfile(p.id); confirmDelete = null } else confirmDelete = p.id
+                })
+            }
+        }
+        item { PillButton("Add a profile", onClick = { vm.profileMenu = true }) }
 
         item { Heading("My channels") }
         item { Text("Favorites and your own lists. Press ≡ on any channel to add it to one.", style = T.body) }

@@ -67,6 +67,7 @@ fun AppRoot(vm: MainViewModel, onExit: () -> Unit) {
                     else -> MainArea(vm, repo)
                 }
                 vm.channelMenu?.let { ChannelMenu(vm, it) }
+                if (vm.profileMenu) ProfileMenu(vm)
                 vm.pinPrompt?.let { PinDialog(vm) }
                 vm.banner?.let { BannerView(vm, it) }
             }
@@ -130,10 +131,18 @@ private fun NavRail(vm: MainViewModel, current: Route) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            Modifier.size(26.dp).clip(RoundedCornerShape(7.dp)).background(LocalAccent.current),
-            contentAlignment = Alignment.Center,
-        ) { Text("L", style = T.h2.copy(color = C.Ink)) }
+        val profile = vm.store.profiles.collectAsStateWithLifecycle().value
+            .firstOrNull { it.id == vm.store.profileId.collectAsStateWithLifecycle().value }
+        Focusable(
+            onClick = { vm.profileMenu = true },
+            modifier = Modifier.size(34.dp),
+            shape = androidx.compose.foundation.shape.CircleShape,
+            color = Color(profile?.color ?: 0xFF4C8DFF),
+            scale = 1.1f,
+        ) {
+            Text(profile?.name?.take(1)?.uppercase() ?: "?", style = T.h2.copy(color = C.Ink),
+                modifier = Modifier.align(Alignment.Center))
+        }
         Spacer(Modifier.height(16.dp))
         for (item in railItems) {
             if (item.route == Route.Settings) Spacer(Modifier.weight(1f))

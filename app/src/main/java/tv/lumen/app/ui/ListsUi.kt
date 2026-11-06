@@ -33,6 +33,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import lumen.core.Channel
@@ -277,4 +278,71 @@ fun RefreshButton(vm: MainViewModel, repo: RepoState, modifier: Modifier = Modif
             Text(fmtAgo(repo.lastRefreshMs, now), style = T.meta.copy(color = C.Faint), modifier = Modifier.padding(top = 2.dp, end = 6.dp))
         }
     }
+}
+
+@Composable
+fun Avatar(p: tv.lumen.app.data.Profile, size: androidx.compose.ui.unit.Dp = 40.dp) {
+    Box(
+        Modifier.size(size).clip(androidx.compose.foundation.shape.CircleShape).background(Color(p.color)),
+        contentAlignment = Alignment.Center,
+    ) { Text(p.name.take(1).uppercase(), style = T.h2.copy(color = C.Ink, fontSize = (size.value * 0.42f).sp)) }
+}
+
+/** "Who's watching?": switch profiles, or add one. */
+@Composable
+fun ProfileMenu(vm: MainViewModel) {
+    val profiles by vm.store.profiles.collectAsStateWithLifecycle()
+    val current by vm.store.profileId.collectAsStateWithLifecycle()
+    var adding by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    val first = remember { FocusRequester() }
+    val nameFr = remember { FocusRequester() }
+    Box(Modifier.fillMaxSize().background(Color(0xE60B0D12)), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Who's watching?", style = T.h1)
+            Spacer(Modifier.height(24.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                profiles.forEachIndexed { i, p ->
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Focusable(
+                            onClick = { vm.switchProfile(p.id) },
+                            modifier = (if (p.id == current || (i == 0 && profiles.none { it.id == current })) Modifier.focusRequester(first) else Modifier).size(84.dp),
+                            shape = androidx.compose.foundation.shape.CircleShape,
+                            color = Color(p.color), scale = 1.1f,
+                        ) { Text(p.name.take(1).uppercase(), style = T.hero.copy(color = C.Ink), modifier = Modifier.align(Alignment.Center)) }
+                        Spacer(Modifier.height(8.dp))
+                        Text(p.name + if (p.id == current) "  ✓" else "", style = T.title)
+                    }
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Focusable(
+                        onClick = { adding = true },
+                        modifier = Modifier.size(84.dp),
+                        shape = androidx.compose.foundation.shape.CircleShape,
+                        color = C.Surface2, focusedColor = C.Raised, scale = 1.1f,
+                    ) { Text("+", style = T.hero.copy(color = C.Muted), modifier = Modifier.align(Alignment.Center)) }
+                    Spacer(Modifier.height(8.dp))
+                    Text("Add profile", style = T.title.copy(color = C.Muted))
+                }
+            }
+            if (adding) {
+                Spacer(Modifier.height(24.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = name, onValueChange = { name = it.take(20) }, singleLine = true, label = { Text("Name") },
+                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = C.Text, unfocusedTextColor = C.Text,
+                            focusedBorderColor = LocalAccent.current, unfocusedBorderColor = C.Line),
+                        modifier = Modifier.width(260.dp).focusRequester(nameFr),
+                    )
+                    PillButton("Create", primary = true, onClick = {
+                        if (name.isNotBlank()) { val p = vm.store.addProfile(name); adding = false; name = ""; vm.switchProfile(p.id) }
+                    })
+                }
+                LaunchedEffect(Unit) { delay(50); runCatching { nameFr.requestFocus() } }
+            }
+            Spacer(Modifier.height(20.dp))
+            Text("Rename, recolor or delete profiles in Settings.", style = T.meta)
+        }
+    }
+    LaunchedEffect(Unit) { delay(60); runCatching { first.requestFocus() } }
 }

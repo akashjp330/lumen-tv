@@ -79,6 +79,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     fun openChannelMenu(ch: Channel) { channelMenu = ch }
+
+    /** "Who's watching?" switcher opened from the side menu. */
+    var profileMenu by mutableStateOf(false)
+
+    fun switchProfile(id: String) {
+        profileMenu = false
+        if (id == store.profileId.value) return
+        store.switchProfile(id)
+        focusMemory.clear()
+        stack.clear(); stack.add(Route.Home)
+        showBanner("Switched to ${store.activeProfile.name}")
+    }
     fun closeChannelMenu() { channelMenu = null }
 
     /** Last focused item per screen, so coming back from the player lands where you were. */
@@ -107,6 +119,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun back(): Boolean {
         if (pinPrompt != null) { pinPrompt = null; return true }
         if (channelMenu != null) { channelMenu = null; return true }
+        if (profileMenu) { profileMenu = false; return true }
         if (stack.size <= 1) return false
         stack.removeAt(stack.lastIndex)
         return true
