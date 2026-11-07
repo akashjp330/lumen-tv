@@ -102,19 +102,31 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
         Text("Search", style = T.h1)
         Spacer(Modifier.height(8.dp))
         if (editing) {
+            // Only leave typing mode after the box really had focus and then lost it
+            // (a new text box reports "not focused" the moment it appears).
+            var hadFocus by remember { mutableStateOf(false) }
+            val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
             OutlinedTextField(
                 value = query, onValueChange = { query = it }, singleLine = true,
                 label = { Text("Channels, shows, movies, series") },
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { editing = false }),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { keyboard?.hide(); editing = false }),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = C.Text, unfocusedTextColor = C.Text,
                     focusedBorderColor = LocalAccent.current, unfocusedBorderColor = C.Line,
                 ),
                 modifier = Modifier.width(520.dp).focusRequester(fieldFr)
-                    .onFocusChanged { if (!it.isFocused && editing && query.isNotBlank()) editing = false },
+                    .onFocusChanged {
+                        if (it.isFocused) hadFocus = true
+                        else if (hadFocus && query.isNotBlank()) editing = false
+                    },
             )
-            LaunchedEffect(Unit) { delay(80); runCatching { fieldFr.requestFocus() } }
+            LaunchedEffect(Unit) {
+                delay(80)
+                runCatching { fieldFr.requestFocus() }
+                delay(50)
+                keyboard?.show() // the Fire Stick doesn't always open it on its own
+            }
         } else {
             // Looks like the search box; OK opens the keyboard.
             Focusable(
