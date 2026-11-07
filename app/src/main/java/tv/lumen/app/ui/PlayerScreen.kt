@@ -415,7 +415,8 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                         PillButton("Guide", onClick = { vm.go(Route.Guide) })
                         PillButton("Audio & subtitles", onClick = { dialog = PlayerDialog.TRACKS })
                         PillButton("Multiview", onClick = {
-                            val others = (prefs.favorites + prefs.recent).distinct().filter { it != channel.key }.take(3)
+                            // Starts with 2 screens: this channel and the one you watched before it.
+                            val others = (listOfNotNull(previousKey) + prefs.recent + prefs.favorites).distinct().filter { it != channel.key }.take(3)
                             vm.go(Route.Multiview(listOf(channel.key) + others))
                         })
                         PillButton("Fix guide match", onClick = { dialog = PlayerDialog.FIX_GUIDE })
