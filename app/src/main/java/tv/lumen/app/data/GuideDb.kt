@@ -90,6 +90,7 @@ class GuideDb(context: Context, sourceId: String) {
             w.setTransactionSuccessful(); w.endTransaction()
             // Index after the bulk insert: much faster than maintaining it row by row.
             w.execSQL("CREATE INDEX idx_ch_start ON programs (ch, start)")
+            w.execSQL("CREATE INDEX idx_start ON programs (start)") // for "what's on now" across all channels
             w.close()
             synchronized(this@GuideDb) {
                 closeQuietly()
@@ -144,6 +145,18 @@ class GuideDb(context: Context, sourceId: String) {
             val like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             read("SELECT ch, start, stop, title, descr, cat FROM programs WHERE stop > ? AND title LIKE ? ESCAPE '\\' ORDER BY start LIMIT $limit",
                 arrayOf(nowMs.toString(), like))
+        }
+
+        override fun matching(fromMs: Long, toMs: Long, titleWords: List<String>, categoryWords: List<String>, limit: Int): List<Program> {
+            if (titleWords.isEmpty() && categoryWords.isEmpty()) return emptyList()
+            fun like(w: String) = "%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            val conds = titleWords.map { "title LIKE ? ESCAPE '\\'" } + categoryWords.map { "cat LIKE ? ESCAPE '\\'" }
+            // Programmes airing in the window started at most 12 h before it: lets SQLite use the start index.
+            val sql = "SELECT ch, start, stop, title, descr, cat FROM programs WHERE start > ? AND start < ? AND stop > ? AND (" +
+                conds.joinToString(" OR ") + ") ORDER BY start LIMIT $limit"
+            val args = arrayOf((fromMs - 12 * 3_600_000L).toString(), toMs.toString(), fromMs.toString()) +
+                titleWords.map { like(it) } + categoryWords.map { like(it) }
+            return safe { read(sql, args) }
         }
 
         private fun read(sql: String, args: Array<String>): List<Program> {

@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import lumen.core.Alternates
 import lumen.core.Catalog
 import lumen.core.Channel
 import lumen.core.Source
@@ -122,6 +123,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun back(): Boolean {
         if (pinPrompt != null) { pinPrompt = null; return true }
         if (channelMenu != null) { channelMenu = null; return true }
+        if (programMenu != null) { programMenu = null; return true }
         if (profileMenu) { profileMenu = false; return true }
         if (stack.size <= 1) return false
         stack.removeAt(stack.lastIndex)
@@ -158,10 +160,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         channelKey = ch.key, subtitle = ch.name, image = ch.logo, zapKeys = zapKeys,
     )
 
-    fun playChannel(ch: Channel, replace: Boolean = false, zapKeys: List<String>? = null) = guarded(ContentType.LIVE, ch.categoryId) {
-        store.pushRecent(ch.key)
-        val route = Route.Player(channelRequest(ch, zapKeys))
-        if (replace && current is Route.Player) replaceTop(route) else go(route)
+    /**
+     * Plays a channel. Unless [exact], a version that's been noticeably smoother
+     * (HD/SD/East/West of the same channel) is played instead, with an offer to undo.
+     */
+    fun playChannel(ch: Channel, replace: Boolean = false, zapKeys: List<String>? = null, exact: Boolean = false) =
+        guarded(ContentType.LIVE, ch.categoryId) {
+            val target = if (exact) ch else smootherVersion(ch) ?: ch
+            store.pushRecent(target.key)
+            val route = Route.Player(channelRequest(target, zapKeys))
+            if (replace && current is Route.Player) replaceTop(route) else go(route)
+            if (target.key != ch.key) {
+                offer("Playing ${target.name}: it's been smoother than ${ch.name} lately.", "Use ${ch.name.take(24)}") {
+                    playChannel(ch, replace = true, zapKeys = zapKeys, exact = true)
+                }
+            }
+        }
+
+    /** A channel's URL in the stream format it should use (TS, or HLS if switched/selected). */
+    fun liveUrl(ch: Channel): String {
+        val u = ch.streamUrl
+        if (!tv.lumen.app.player.StreamUrls.canSwitch(u)) return u
+        val s = store.settings.value
+        val fmt = if (s.streamFormat == "auto") store.channelFormat(ch.key) ?: "ts" else s.streamFormat
+        return tv.lumen.app.player.StreamUrls.withFormat(u, fmt)
+    }
+
+    private fun smootherVersion(ch: Channel): Channel? {
+        if (!store.settings.value.smartVersions) return null
+        val mine = store.health(ch.key)
+        if (mine.rank != 0) return null // only step in when this one has a track record of freezing
+        val catalog = repo.state.value.catalog ?: return null
+        val visible = repo.visibleChannels(catalog)
+        return Alternates.of(ch, visible).firstOrNull { store.health(it.key).rank == 2 }
+    }
+
+    // ---------- programme menu (≡ on a show in the guide, search or sports rows) ----------
+
+    var programMenu by mutableStateOf<Pair<Channel, Program>?>(null)
+    fun openProgramMenu(ch: Channel, p: Program) { programMenu = ch to p }
+    fun closeProgramMenu() { programMenu = null }
+
+    fun toggleFollow(word: String) {
+        val was = store.isFollowing(word)
+        store.toggleFollow(word)
+        repo.recomputeSports()
+        showBanner(if (was) "Stopped following $word" else "Following $word: it'll be highlighted in the guide and you'll get a reminder before it starts")
     }
 
     fun playCatchup(ch: Channel, p: Program) = guarded(ContentType.LIVE, ch.categoryId) {
@@ -222,8 +266,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun hasReminder(ch: Channel, p: Program) =
         store.prefs.value.reminders.any { it.channelKey == ch.key && it.startMs == p.startMs }
 
+    private val followNotified = HashSet<String>()
+
+    /** Followed teams/shows: a heads-up shortly before they start (while the app is open). */
+    private fun checkFollows(now: Long) {
+        for (item in repo.state.value.followed) {
+            val p = item.program
+            val id = p.title + "@" + p.startMs
+            val untilStart = p.startMs - now
+            if (untilStart in -2 * 60_000..5 * 60_000 && followNotified.add(id)) {
+                val ch = item.best
+                val whenText = if (untilStart > 60_000) "starts in ${untilStart / 60_000} min" else "is starting"
+                banner = Banner("${p.title} $whenText on ${ch.name}", "Watch") {
+                    banner = null; playChannel(ch, zapKeys = item.channels.map { it.key }.takeIf { it.size > 1 })
+                }
+                return
+            }
+        }
+    }
+
     private fun checkReminders() {
         val now = System.currentTimeMillis()
+        checkFollows(now)
         val due = store.prefs.value.reminders.filter { it.startMs - 60_000 <= now }
         if (due.isEmpty()) return
         store.updatePrefs { it.copy(reminders = it.reminders - due.toSet()) }

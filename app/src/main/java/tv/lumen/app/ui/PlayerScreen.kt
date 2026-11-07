@@ -70,7 +70,7 @@ import tv.lumen.app.player.LiveController
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 
-private enum class PlayerDialog { TRACKS, FIX_GUIDE, VERSIONS, CHANNELS }
+private enum class PlayerDialog { TRACKS, FIX_GUIDE, VERSIONS, CHANNELS, QUICKDIAL }
 
 @Composable
 fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
@@ -103,6 +103,8 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
     var buffering by remember { mutableStateOf(true) }
     var failed by remember { mutableStateOf<String?>(null) }
     var troubleSignal by remember { mutableIntStateOf(0) }
+    /** Freezes + errors on the current channel, for learning which version plays smoothest. */
+    val troubles = remember { intArrayOf(0) }
     var position by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
 
@@ -131,6 +133,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 }
             }
             override fun onPlayerError(error: PlaybackException) {
+                if (latestReq.isLive) troubles[0]++
                 if (latestReq.isLive && live.noteTrouble()) troubleSignal++
                 failed = when (error.errorCode) {
                     PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
@@ -187,6 +190,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
         var n = 0
         var liveSec = 0L
         var liveKey: String? = null
+        var healthSec = 0L
         try {
             while (true) {
                 delay(1_000)
@@ -195,7 +199,9 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 val r = latestReq
                 if (++n % 15 == 0 && !r.isLive) vm.saveProgress(r, position, duration)
                 if (r.isLive) {
+                    val before = live.stalls
                     if (live.tick()) troubleSignal++
+                    if (live.stalls > before) troubles[0]++
                     behind = live.behindLive()
                     rewindable = live.rewindable()
                 }
@@ -208,15 +214,17 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                     vm.showBanner("Sleep timer: playback stopped.")
                 }
                 // Count live viewing time per channel for "Most watched".
+                // ...and how smoothly it played.
                 if (r.isLive && r.channelKey != liveKey) {
-                    liveKey?.let { vm.store.addWatchTime(it, liveSec) }
-                    liveKey = r.channelKey; liveSec = 0
+                    liveKey?.let { vm.store.addWatchTime(it, liveSec); vm.store.addHealth(it, healthSec, troubles[0]) }
+                    liveKey = r.channelKey; liveSec = 0; healthSec = 0; troubles[0] = 0
                 }
-                if (r.isLive && player.isPlaying) liveSec++
+                if (r.isLive && player.isPlaying) { liveSec++; healthSec++ }
                 if (liveSec >= 60) { liveKey?.let { vm.store.addWatchTime(it, liveSec) }; liveSec = 0 }
+                if (healthSec >= 300) { liveKey?.let { vm.store.addHealth(it, healthSec, troubles[0]) }; healthSec = 0; troubles[0] = 0 }
             }
         } finally {
-            liveKey?.let { vm.store.addWatchTime(it, liveSec) }
+            liveKey?.let { vm.store.addWatchTime(it, liveSec); vm.store.addHealth(it, healthSec, troubles[0]) }
         }
     }
     LaunchedEffect(channel?.key) { channel?.let { vm.repo.ensureGuide(listOf(it)) } }
@@ -325,6 +333,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 // ▲ opens the channel list to pick from; ▼ / OK show info and controls (no channel change).
                 AndroidKeyEvent.KEYCODE_DPAD_UP -> dialog = PlayerDialog.CHANNELS
                 AndroidKeyEvent.KEYCODE_DPAD_DOWN -> overlay = true
+                AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> dialog = PlayerDialog.QUICKDIAL
                 AndroidKeyEvent.KEYCODE_DPAD_LEFT -> channelOf(previousKey)?.let { switchTo(it) } ?: vm.showBanner("No previous channel yet")
                 AndroidKeyEvent.KEYCODE_MENU -> channel?.let { vm.openChannelMenu(it) }
                 AndroidKeyEvent.KEYCODE_BACK -> return false
@@ -441,7 +450,7 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     if (req.isLive) "▲ channel list" + (if (req.zapKeys != null) " (this list)" else "") +
-                        "  ·  ◀ previous channel  ·  0–9 channel number" +
+                        "  ·  ◀ previous channel  ·  ▶ quick dial" +
                         (if (live.usingBuffer) "  ·  ⏪ ⏩ 30 s" else "") + "  ·  ≡ lists  ·  Back hides this"
                     else "◀ back 10 s  ·  ▶ ahead 30 s  ·  OK pause  ·  Back hides this",
                     style = T.meta,
@@ -452,9 +461,15 @@ fun PlayerScreen(vm: MainViewModel, initial: PlayRequest) {
         when (dialog) {
             PlayerDialog.TRACKS -> TracksDialog(player) { dialog = null }
             PlayerDialog.FIX_GUIDE -> channel?.let { ch -> FixGuideDialog(vm, ch, repo.epgChannels) { dialog = null } }
+            PlayerDialog.QUICKDIAL -> QuickDial(
+                favorites = prefs.favorites.mapNotNull { k -> visible.firstOrNull { it.key == k } },
+                all = visible, now = now, guide = repo.guide,
+                onPick = { dialog = null; switchTo(it) },
+            ) { dialog = null }
             PlayerDialog.CHANNELS -> ChannelListPanel(zapList(), channel, now, repo.guide,
                 title = if (req.zapKeys != null) "This list" else (channel?.let { c -> repo.catalog?.liveCategories?.firstOrNull { it.id == c.categoryId }?.name?.let(::displayCategory) } ?: "Channels"),
-                onPick = { dialog = null; switchTo(it) }) { dialog = null }
+                onPick = { dialog = null; switchTo(it) },
+                favNumbers = prefs.favorites.withIndex().associate { (i, k) -> k to i + 1 }) { dialog = null }
             PlayerDialog.VERSIONS -> VersionsDialog(versions, now, repo.guide, onPick = { dialog = null; switchTo(it) }) { dialog = null }
             null -> Unit
         }
@@ -679,6 +694,7 @@ private fun ChannelListPanel(
     guide: lumen.core.Guide,
     title: String,
     onPick: (Channel) -> Unit,
+    favNumbers: Map<String, Int> = emptyMap(),
     onClose: () -> Unit,
 ) {
     val start = channels.indexOfFirst { it.key == current?.key }.coerceAtLeast(0)
@@ -703,7 +719,8 @@ private fun ChannelListPanel(
                             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             ChannelLogo(ch, Modifier.size(52.dp, 34.dp).clip(RoundedCornerShape(6.dp)).background(C.Ink), monogramSize = 24.dp)
                             Column(Modifier.weight(1f)) {
-                                OneLine("${ch.number}  ${ch.name}" + if (isCurrent) "  · watching" else "", T.title.copy(color = if (f) C.Ink else C.Text))
+                                OneLine((favNumbers[ch.key]?.let { "★$it  " } ?: "") + "${ch.number}  ${ch.name}" + if (isCurrent) "  · watching" else "",
+                                    T.title.copy(color = if (f) C.Ink else C.Text))
                                 OneLine(p?.let { "${it.title} · ${fmtLeft(it, now)}" } ?: "", T.meta.copy(color = if (f) C.Ink else C.Muted))
                             }
                             QualityBadge(ch.name)
@@ -714,4 +731,80 @@ private fun ChannelListPanel(
         }
     }
     LaunchedEffect(Unit) { delay(50); runCatching { fr.requestFocus() } }
+}
+
+
+/**
+ * On-screen number pad: favourites are numbered 1, 2, 3… in their order, so "5" + OK is
+ * your fifth favourite. Switch to "Channel numbers" for the provider's numbering.
+ */
+@Composable
+private fun QuickDial(
+    favorites: List<Channel>,
+    all: List<Channel>,
+    now: Long,
+    guide: lumen.core.Guide,
+    onPick: (Channel) -> Unit,
+    onClose: () -> Unit,
+) {
+    var digits by remember { mutableStateOf("") }
+    var favMode by remember { mutableStateOf(favorites.isNotEmpty()) }
+    val first = remember { FocusRequester() }
+    val target: Channel? = digits.toIntOrNull()?.let { n ->
+        if (favMode) favorites.getOrNull(n - 1) else all.firstOrNull { it.number == n }
+    }
+    fun press(d: String) { if (digits.length < 5) digits += d }
+    Box(
+        Modifier.fillMaxSize().background(Color(0x99000000)).onPreviewKeyEvent { e ->
+            if (e.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
+            val c = e.nativeKeyEvent.keyCode
+            if (c in AndroidKeyEvent.KEYCODE_0..AndroidKeyEvent.KEYCODE_9) { press((c - AndroidKeyEvent.KEYCODE_0).toString()); true } else false
+        },
+        contentAlignment = Alignment.CenterEnd,
+    ) {
+        Column(Modifier.padding(32.dp).width(330.dp).clip(RoundedCornerShape(16.dp)).background(C.Surface).padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                PillButton("Favorites #", selected = favMode, onClick = { favMode = true; digits = "" })
+                PillButton("Channel #", selected = !favMode, onClick = { favMode = false; digits = "" })
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(digits.ifEmpty { "–" }, style = T.hero)
+            Box(Modifier.height(44.dp), contentAlignment = Alignment.Center) {
+                when {
+                    target != null -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ChannelLogo(target, Modifier.size(46.dp, 30.dp).clip(RoundedCornerShape(5.dp)).background(C.Ink), monogramSize = 22.dp)
+                        Column {
+                            OneLine(target.name, T.title)
+                            guide.at(target.key, now)?.let { OneLine(it.title, T.meta) }
+                        }
+                    }
+                    digits.isNotEmpty() -> Text(if (favMode) "You have ${favorites.size} favorites" else "No channel ${digits}", style = T.meta)
+                    favMode && favorites.isEmpty() -> Text("Add favorites to give them numbers", style = T.meta)
+                    else -> Text(if (favMode) "Type a favorite's number" else "Type a channel number", style = T.meta)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            val keys = listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), listOf("⌫", "0", "OK"))
+            for ((ri, row) in keys.withIndex()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                    for ((ci, k) in row.withIndex()) {
+                        Focusable(
+                            onClick = {
+                                when (k) {
+                                    "⌫" -> digits = digits.dropLast(1)
+                                    "OK" -> target?.let(onPick)
+                                    else -> press(k)
+                                }
+                            },
+                            modifier = Modifier.size(80.dp, 46.dp).then(if (ri == 0 && ci == 0) Modifier.focusRequester(first) else Modifier),
+                            color = if (k == "OK") LocalAccent.current else C.Surface2, focusedColor = C.Text, ring = false,
+                        ) { f -> Text(k, style = T.h2.copy(color = if (f || k == "OK") C.Ink else C.Text), modifier = Modifier.align(Alignment.Center)) }
+                    }
+                }
+            }
+            Text("Back to close", style = T.meta)
+        }
+    }
+    LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
 }

@@ -10,6 +10,14 @@ interface Guide {
     /** Case-insensitive title search, soonest first, returning (channel key, programme). */
     fun search(query: String, nowMs: Long, limit: Int = 60): List<Pair<String, Program>>
 
+    /**
+     * Programmes overlapping [fromMs, toMs) whose title contains any of [titleWords] or
+     * whose category contains any of [categoryWords] (case-insensitive), as
+     * (channel key, programme). Every channel carrying a programme is listed.
+     */
+    fun matching(fromMs: Long, toMs: Long, titleWords: List<String>, categoryWords: List<String>, limit: Int = 400):
+        List<Pair<String, Program>> = emptyList()
+
     /** Adds per-channel listings (e.g. fetched on demand) for channels that have none. */
     fun withExtra(extra: Map<String, List<Program>>): Guide =
         if (extra.isEmpty()) this else LayeredGuide(this, EpgIndex(extra.mapValues { (_, v) -> v.sortedBy { it.startMs } }))
@@ -24,6 +32,8 @@ class LayeredGuide(private val base: Guide, private val extra: EpgIndex) : Guide
     override fun window(channelKey: String, fromMs: Long, toMs: Long) = pick(channelKey).window(channelKey, fromMs, toMs)
     override fun search(query: String, nowMs: Long, limit: Int) =
         (base.search(query, nowMs, limit) + extra.search(query, nowMs, limit)).distinct().sortedBy { it.second.startMs }.take(limit)
+    override fun matching(fromMs: Long, toMs: Long, titleWords: List<String>, categoryWords: List<String>, limit: Int) =
+        (base.matching(fromMs, toMs, titleWords, categoryWords, limit) + extra.matching(fromMs, toMs, titleWords, categoryWords, limit)).distinct()
     override fun withExtra(extra: Map<String, List<Program>>): Guide {
         if (extra.isEmpty()) return this
         val merged = HashMap(this.extra.byChannelKey)
@@ -64,6 +74,16 @@ class EpgIndex(val byChannelKey: Map<String, List<Program>>) : Guide {
             val p = list[i]
             if (p.startMs >= toMs) break
             if (p.stopMs > fromMs) out.add(p)
+        }
+        return out
+    }
+
+    override fun matching(fromMs: Long, toMs: Long, titleWords: List<String>, categoryWords: List<String>, limit: Int):
+        List<Pair<String, Program>> {
+        val out = ArrayList<Pair<String, Program>>()
+        for ((key, list) in byChannelKey) for (p in list) {
+            if (p.stopMs > fromMs && p.startMs < toMs && ProgramFilter.matches(p, titleWords, categoryWords)) out.add(key to p)
+            if (out.size >= limit) return out
         }
         return out
     }

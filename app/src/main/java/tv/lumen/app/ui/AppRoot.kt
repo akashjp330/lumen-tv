@@ -67,6 +67,7 @@ fun AppRoot(vm: MainViewModel, onExit: () -> Unit) {
                     else -> MainArea(vm, repo)
                 }
                 vm.channelMenu?.let { ChannelMenu(vm, it) }
+                vm.programMenu?.let { (ch, p) -> ProgramMenu(vm, ch, p) }
                 if (vm.profileMenu) ProfileMenu(vm)
                 vm.pinPrompt?.let { PinDialog(vm) }
                 vm.banner?.let { BannerView(vm, it) }

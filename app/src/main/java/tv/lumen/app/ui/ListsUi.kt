@@ -189,9 +189,14 @@ fun ManageListsScreen(vm: MainViewModel, repo: RepoState) {
                 Text("No channels yet. Press ≡ on a channel anywhere in the app and choose this list.", style = T.body)
             }
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(bottom = 32.dp)) {
+                if (list.id == FAVORITES_ID && list.keys.isNotEmpty()) item {
+                    Text("These are your quick-dial numbers: while watching, press ▶ and type the number. Move channels up or down to renumber.",
+                        style = T.meta, modifier = Modifier.padding(bottom = 6.dp))
+                }
                 items(list.keys, key = { it }) { k ->
                     val ch = byKey[k]
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (list.id == FAVORITES_ID) Text("★${list.keys.indexOf(k) + 1}", style = T.h2.copy(color = LocalAccent.current), modifier = Modifier.width(44.dp))
                         Text(ch?.number?.toString() ?: "", style = T.meta, modifier = Modifier.width(40.dp))
                         OneLine(ch?.name ?: "Channel no longer offered", T.title, Modifier.width(280.dp))
                         PillButton("▲", onClick = { vm.store.moveInList(list.id, k, -1) })
@@ -381,4 +386,46 @@ fun PhoneLinkScreen(vm: MainViewModel) {
         PillButton("Done", onClick = { vm.back() }, modifier = Modifier.focusRequester(first))
     }
     LaunchedEffect(Unit) { delay(80); runCatching { first.requestFocus() } }
+}
+
+/** ≡ on a show: watch, remind, follow either team (or the show), channel options. */
+@Composable
+fun ProgramMenu(vm: MainViewModel, ch: lumen.core.Channel, p: lumen.core.Program) {
+    val prefs by vm.store.prefs.collectAsStateWithLifecycle()
+    val now = System.currentTimeMillis()
+    val first = remember { FocusRequester() }
+    val teams = remember(p.title) { lumen.core.Sports.teams(p.title) }
+    val showName = remember(p.title) { p.title.substringAfterLast(": ", p.title).replace(Regex("""\s*\(.*?\)\s*$"""), "").trim() }
+    Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.CenterEnd) {
+        Column(Modifier.width(380.dp).fillMaxHeight().background(C.Surface).padding(20.dp)) {
+            Text(p.title, style = T.h2, maxLines = 2)
+            Text("${ch.name} · ${fmtDay(p.startMs)} ${fmtRange(p)}", style = T.meta)
+            p.description?.let { Text(it, style = T.meta.copy(color = C.Text2), maxLines = 3, modifier = Modifier.padding(top = 4.dp)) }
+            Spacer(Modifier.height(14.dp))
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                item {
+                    when {
+                        p.isAiring(now) -> MenuRow("Watch now on ${ch.name}", Modifier.focusRequester(first)) { vm.closeProgramMenu(); vm.playChannel(ch) }
+                        p.stopMs <= now && lumen.core.Catchup.isAvailable(ch, p, now) ->
+                            MenuRow("Watch from the start", Modifier.focusRequester(first)) { vm.closeProgramMenu(); vm.playCatchup(ch, p) }
+                        p.startMs > now -> MenuRow(if (vm.hasReminder(ch, p)) "✓  Reminder set (remove)" else "Remind me when it starts",
+                            Modifier.focusRequester(first)) { vm.toggleReminder(ch, p) }
+                        else -> MenuRow("Watch ${ch.name}", Modifier.focusRequester(first)) { vm.closeProgramMenu(); vm.playChannel(ch) }
+                    }
+                }
+                item { Text("Follow", style = T.meta, modifier = Modifier.padding(top = 6.dp)) }
+                val words = if (teams.size == 2) teams else listOf(showName)
+                items(words.size) { i ->
+                    val w = words[i]
+                    val on = prefs.follows.any { it.equals(w, true) }
+                    MenuRow(if (on) "✓  Following $w" else "+  Follow $w", Modifier) { vm.toggleFollow(w) }
+                }
+                item { Text("Following highlights it in the guide, adds it to Home, and reminds you before it starts.", style = T.meta) }
+                item { Spacer(Modifier.height(6.dp)) }
+                item { MenuRow("Channel options…", Modifier) { vm.closeProgramMenu(); vm.openChannelMenu(ch) } }
+                item { MenuRow("Done", Modifier) { vm.closeProgramMenu() } }
+            }
+        }
+    }
+    LaunchedEffect(Unit) { delay(60); runCatching { first.requestFocus() } }
 }

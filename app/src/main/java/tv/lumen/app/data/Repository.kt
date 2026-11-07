@@ -52,6 +52,12 @@ data class RepoState(
     val guideError: String? = null,
     /** When channels and guide were last downloaded from the provider. */
     val lastRefreshMs: Long = 0,
+    /** Sport airing now, one entry per game/event. */
+    val sportsNow: List<lumen.core.Sports.Item> = emptyList(),
+    /** Games starting in the next 6 hours. */
+    val sportsSoon: List<lumen.core.Sports.Item> = emptyList(),
+    /** Followed teams/shows on now or in the next 24 hours. */
+    val followed: List<lumen.core.Sports.Item> = emptyList(),
 )
 
 /**
@@ -74,6 +80,7 @@ class Repository(private val context: Context, val store: Store) {
         private set
 
     private var loadJob: Job? = null
+    private var sportsJob: Job? = null
     private var periodicJob: Job? = null
     private val refreshLock = Mutex()
     @Volatile private var guideDb: GuideDb? = null
@@ -118,6 +125,14 @@ class Repository(private val context: Context, val store: Store) {
             while (isActive) {
                 delay(AUTO_REFRESH_MS)
                 refreshNow()
+            }
+        }
+        sportsJob?.cancel()
+        sportsJob = scope.launch {
+            while (isActive) {
+                delay(15_000)
+                runCatching { computeSports() }.onFailure { DiagLog.log("Sports lookup failed", it) }
+                delay(165_000) // every 3 minutes
             }
         }
     }
@@ -199,6 +214,36 @@ class Repository(private val context: Context, val store: Store) {
     private fun applyGuide(catalog: Catalog, ps: ProgramStore) {
         val g = StoreGuide.build(visibleChannels(catalog), ps, store.prefs.value.epgOverrides)
         _state.update { it.copy(guide = g.withExtra(onDemand), epgChannels = ps.epgChannels()) }
+        scope.launch { runCatching { computeSports() } }
+    }
+
+    /** Re-run after follows or favorites change. */
+    fun recomputeSports() { scope.launch { runCatching { computeSports() } } }
+
+    /** Finds sport on now, games coming up, and followed teams/shows, across every channel. */
+    private fun computeSports() {
+        val s = _state.value
+        val catalog = s.catalog ?: return
+        val guide = s.guide
+        val byKey = visibleChannels(catalog).associateBy { it.key }
+        val prefs = store.prefs.value
+        val favs = prefs.favorites.toSet()
+        val rank: (Channel) -> Int = { store.health(it.key).rank }
+        val now = System.currentTimeMillis()
+        val sw = lumen.core.Sports
+        val nowHits = guide.matching(now, now + 1, sw.TITLE_WORDS, sw.CATEGORY_WORDS, 1500)
+            .filter { (_, p) -> sw.isSport(p) && p.isAiring(now) }
+        val live = sw.group(nowHits, byKey, favs, rank)
+            .sortedWith(compareByDescending<lumen.core.Sports.Item> { sw.isGame(it.program) }.thenBy { it.program.stopMs })
+        val soonHits = guide.matching(now + 60_000, now + 6 * 3_600_000, sw.TITLE_WORDS, sw.CATEGORY_WORDS, 1500)
+            .filter { (_, p) -> p.startMs > now && sw.isGame(p) }
+        val soon = sw.group(soonHits, byKey, favs, rank)
+        val followed = if (prefs.follows.isEmpty()) emptyList() else {
+            val hits = guide.matching(now, now + 24 * 3_600_000, prefs.follows, emptyList(), 600)
+                .filter { (_, p) -> lumen.core.Follows.matches(p.title, prefs.follows) != null }
+            sw.group(hits, byKey, favs, rank)
+        }
+        _state.update { it.copy(sportsNow = live.take(40), sportsSoon = soon.take(40), followed = followed.take(40)) }
     }
 
     /** Re-matches the guide after the user fixes a channel's guide match or shows a hidden category (no download). */

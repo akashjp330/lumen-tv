@@ -50,6 +50,10 @@ private sealed interface Tile {
     data class Resume(val w: WatchProgress) : Tile { override val id = "w:${w.id}" }
     data class Film(val m: Movie) : Tile { override val id = "m:${m.id}" }
     data class Show(val s: Series) : Tile { override val id = "s:${s.id}" }
+    /** A game or followed show, possibly on several channels (best one first). */
+    data class Event(val item: lumen.core.Sports.Item) : Tile {
+        override val id = "e:${item.program.title}@${item.program.startMs}"
+    }
 }
 
 private data class Rail(val title: String, val tiles: List<Tile>, val hint: String? = null, val key: String = "rail:$title") {
@@ -82,14 +86,20 @@ fun HomeScreen(vm: MainViewModel, repo: RepoState) {
         out
     }
 
-    val rails = remember(visible, prefs, guide, minute, vodRails) {
+    val rails = remember(visible, prefs, guide, minute, vodRails, repo.sportsNow, repo.sportsSoon, repo.followed) {
         val out = ArrayList<Rail>()
+        // Your teams and shows: on now first, then the next 24 hours.
+        if (repo.followed.isNotEmpty()) out += Rail("Your teams & shows", repo.followed.map { Tile.Event(it) },
+            hint = "Follow more from the guide: ≡ on a game")
         val resume = prefs.progress.values.filter { !it.finished }.sortedByDescending { it.updatedMs }.take(15)
         if (resume.isNotEmpty()) out += Rail("Continue watching", resume.map { Tile.Resume(it) })
         for (list in prefs.allLists) {
             val chans = list.keys.mapNotNull { byKey[it] }
             if (chans.isNotEmpty()) out += Rail(list.name, chans.map { Tile.Live(it) }, key = "list:" + list.id)
         }
+        if (repo.sportsNow.isNotEmpty()) out += Rail("Sports on now", repo.sportsNow.map { Tile.Event(it) })
+        if (repo.sportsSoon.isNotEmpty()) out += Rail("Coming up in sports", repo.sportsSoon.map { Tile.Event(it) },
+            hint = "OK for a reminder · ≡ to follow a team")
         val recent = prefs.recent.mapNotNull { byKey[it] }.take(25)
         if (recent.isNotEmpty()) out += Rail("Recently watched", recent.map { Tile.Live(it) })
         // What you actually watch, that isn't a favorite yet.
@@ -252,6 +262,38 @@ private fun TileView(
                 Spacer(Modifier.height(6.dp))
                 OneLine(p?.title ?: tile.ch.name, T.title)
                 OneLine(tile.note ?: if (p != null) "${tile.ch.name} · ${fmtLeft(p, now)}" else "Ch ${tile.ch.number}", T.meta)
+            }
+        }
+        is Tile.Event -> {
+            val item = tile.item
+            val p = item.program
+            val ch = item.best
+            val airing = p.isAiring(now)
+            Column(Modifier.width(200.dp)) {
+                Focusable(
+                    onClick = {
+                        if (p.startMs > now) vm.toggleReminder(ch, p)
+                        else vm.playChannel(ch, zapKeys = item.channels.map { it.key }.takeIf { it.size > 1 })
+                    },
+                    modifier = modifier.fillMaxWidth().height(95.dp),
+                    color = C.Surface, onFocus = onFocus,
+                    onMenu = { vm.openProgramMenu(ch, p) },
+                ) {
+                    ChannelLogo(ch, Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 16.dp))
+                    Row(Modifier.padding(7.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (airing) LiveChip() else Text(fmtClock(p.startMs), style = T.chip.copy(color = C.Text),
+                            modifier = Modifier.clip(RoundedCornerShape(3.dp)).background(C.Ink.copy(alpha = 0.75f)).padding(horizontal = 5.dp, vertical = 2.dp))
+                        if (vm.hasReminder(ch, p)) Text("REMINDER", style = T.chip.copy(color = C.Ink),
+                            modifier = Modifier.clip(RoundedCornerShape(3.dp)).background(LocalAccent.current).padding(horizontal = 5.dp, vertical = 2.dp))
+                    }
+                    if (item.channels.size > 1) Text("+${item.channels.size - 1}", style = T.chip.copy(color = C.Text),
+                        modifier = Modifier.align(Alignment.TopEnd).padding(7.dp).clip(RoundedCornerShape(3.dp))
+                            .background(C.Ink.copy(alpha = 0.75f)).padding(horizontal = 5.dp, vertical = 2.dp))
+                    if (airing) ProgressBar(p.progress(now), Modifier.fillMaxWidth().align(Alignment.BottomCenter), height = 3.dp)
+                }
+                Spacer(Modifier.height(6.dp))
+                OneLine(p.title, T.title)
+                OneLine(ch.name + " · " + (if (airing) fmtLeft(p, now) else fmtDay(p.startMs).substringBefore(',') + " " + fmtClock(p.startMs)), T.meta)
             }
         }
         is Tile.Resume -> Column(Modifier.width(170.dp)) {

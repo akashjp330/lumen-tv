@@ -52,7 +52,12 @@ data class UserPrefs(
     val lists: List<ChannelList> = emptyList(),
     /** Seconds watched per channel, for "Most watched". */
     val watchSec: Map<String, Long> = emptyMap(),
+    /** Teams and shows this person follows (words matched in programme titles). */
+    val follows: List<String> = emptyList(),
 ) {
+    /** Favorites are numbered 1, 2, 3… in their order: the quick-dial numbers. */
+    fun favoriteNumber(channelKey: String): Int? = favorites.indexOf(channelKey).takeIf { it >= 0 }?.plus(1)
+
     /** Favorites first, then the user's own lists. */
     val allLists: List<ChannelList> get() = listOf(ChannelList(FAVORITES_ID, "Favorites", favorites)) + lists
 
@@ -73,6 +78,10 @@ data class AppSettings(
     /** "fit", "fill" (zoom to fill, crops edges) or "stretch". */
     val pictureShape: String = "fit",
     val startOnLastChannel: Boolean = false,
+    /** Small live picture in the guide header that follows the highlighted channel. */
+    val guidePreview: Boolean = true,
+    /** Start with the smoothest version of a channel (HD/SD/East/West) based on history. */
+    val smartVersions: Boolean = true,
     /** Live pause & rewind: keep a buffer of the channel you're watching on the device. */
     val timeshift: Boolean = true,
 )
@@ -342,6 +351,7 @@ class Store(context: Context) {
                 watchSec = (o.obj("ws")?.map ?: emptyMap<Any, Any>()).entries.mapNotNull { e ->
                     (e.value as? Number)?.toLong()?.let { e.key.toString() to it }
                 }.toMap(),
+                follows = o.strList("fol"),
             )
         }.getOrDefault(UserPrefs())
     }
@@ -366,6 +376,7 @@ class Store(context: Context) {
             },
             "rem" to p.reminders.map { mapOf("c" to it.channelKey, "s" to it.startMs, "t" to it.title) },
             "lists" to p.lists.map { mapOf("id" to it.id, "n" to it.name, "k" to it.keys) },
+            "fol" to p.follows,
             // keep the 300 most watched so the saved file stays small
             "ws" to p.watchSec.entries.sortedByDescending { it.value }.take(300).associate { it.key to it.value },
         )
@@ -379,7 +390,8 @@ class Store(context: Context) {
         sp.edit().putString("settings", Json.write(
             mapOf("pin" to next.pinHash, "lp2" to next.livePreview, "tmdb" to next.tmdbKey, "acc" to next.accent,
                 "buf" to next.bufferLevel, "fmt" to next.streamFormat, "swdec" to next.softwareDecoder,
-                "shape" to next.pictureShape, "last" to next.startOnLastChannel, "ts" to next.timeshift)
+                "shape" to next.pictureShape, "last" to next.startOnLastChannel, "ts" to next.timeshift,
+                "gp" to next.guidePreview, "smart" to next.smartVersions)
         )).apply()
     }
 
@@ -398,6 +410,8 @@ class Store(context: Context) {
                 pictureShape = o.text("shape")?.takeIf { it in setOf("fit", "fill", "stretch") } ?: "fit",
                 startOnLastChannel = o.bool("last"),
                 timeshift = o.raw("ts")?.let { o.bool("ts") } ?: true,
+                guidePreview = o.raw("gp")?.let { o.bool("gp") } ?: true,
+                smartVersions = o.raw("smart")?.let { o.bool("smart") } ?: true,
             )
         }.getOrDefault(AppSettings())
     }
@@ -412,6 +426,57 @@ class Store(context: Context) {
     fun setChannelFormat(channelKey: String, format: String?) {
         val src = _activeId.value ?: return
         sp.edit().apply { if (format == null) remove("fmt_${src}_$channelKey") else putString("fmt_${src}_$channelKey", format) }.apply()
+    }
+
+    fun toggleFollow(word: String) = updatePrefs { p ->
+        val w = word.trim()
+        if (w.isEmpty()) p
+        else if (p.follows.any { it.equals(w, true) }) p.copy(follows = p.follows.filterNot { it.equals(w, true) })
+        else p.copy(follows = p.follows + w)
+    }
+
+    fun isFollowing(word: String) = prefs.value.follows.any { it.equals(word.trim(), true) }
+
+    // ---------- how smoothly each channel plays (shared per provider) ----------
+
+    data class Health(val seconds: Long, val troubles: Int) {
+        val known get() = seconds >= 600
+        val perHour get() = troubles / (seconds / 3600.0).coerceAtLeast(0.17)
+        /** 2 = smooth, 1 = unknown, 0 = troublesome. */
+        val rank get() = when { !known -> 1; perHour <= 1.0 -> 2; perHour >= 3.0 -> 0; else -> 1 }
+    }
+
+    @Volatile private var healthCache: Pair<String, MutableMap<String, Health>>? = null
+
+    private fun healthMap(): MutableMap<String, Health> {
+        val src = _activeId.value ?: return HashMap()
+        healthCache?.let { if (it.first == src) return it.second }
+        val m = HashMap<String, Health>()
+        sp.getString("health_$src", null)?.let { raw ->
+            runCatching {
+                Json.parseObject(raw).map.forEach { (k, v) ->
+                    (v as? List<*>)?.let { l -> m[k.toString()] = Health((l.getOrNull(0) as? Number)?.toLong() ?: 0, (l.getOrNull(1) as? Number)?.toInt() ?: 0) }
+                }
+            }
+        }
+        healthCache = src to m
+        return m
+    }
+
+    fun health(channelKey: String): Health = healthMap()[channelKey] ?: Health(0, 0)
+
+    @Synchronized
+    fun addHealth(channelKey: String, seconds: Long, troubles: Int) {
+        if (seconds <= 0 && troubles <= 0) return
+        val src = _activeId.value ?: return
+        val m = healthMap()
+        val old = m[channelKey] ?: Health(0, 0)
+        // Recent viewing matters most: cap the history at ~10 hours per channel.
+        var h = Health(old.seconds + seconds, old.troubles + troubles)
+        if (h.seconds > 36_000) h = Health(h.seconds / 2, h.troubles / 2)
+        m[channelKey] = h
+        val keep = m.entries.sortedByDescending { it.value.seconds }.take(500)
+        sp.edit().putString("health_$src", Json.write(keep.associate { it.key to listOf(it.value.seconds, it.value.troubles) })).apply()
     }
 
     fun clearChannelFormats() {

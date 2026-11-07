@@ -235,6 +235,30 @@ class CoreTest {
         assertEquals(3, Alternates.index(all).size)
     }
 
+    @Test fun sportsDetectionAndGrouping() {
+        val t0 = 1_700_000_000_000L
+        fun pr(title: String, cat: String? = null, start: Long = t0) = Program("x", start, start + 3 * 3_600_000, title, null, cat)
+        assertEquals(listOf("Houston Texans", "Indianapolis Colts"), Sports.teams("NFL Football: Houston Texans at Indianapolis Colts (Live)"))
+        assertEquals(listOf("Duke", "North Carolina"), Sports.teams("Duke vs. North Carolina"))
+        assertEquals(listOf("Arsenal", "Chelsea"), Sports.teams("Premier League: Arsenal v Chelsea"))
+        assertTrue(Sports.isGame(pr("NFL Football: Texans at Colts")))
+        assertTrue(Sports.isGame(pr("Lakers @ Celtics")))
+        assertFalse(Sports.isGame(pr("Live at Five")))
+        assertFalse(Sports.isGame(pr("Evening News")))
+        assertTrue(Sports.isSport(pr("SportsCenter")))
+        assertTrue(Sports.isSport(pr("Inside the Game", cat = "Sports")))
+        fun ch(k: String, n: String, num: Int) = Channel(k, num, n, null, "1", null, "u")
+        val chans = listOf(ch("1", "USA CBS SD", 10), ch("2", "USA CBS HD", 11), ch("3", "USA NFL Sunday Ticket 1", 500), ch("9", "USA ESPN", 20))
+        val by = chans.associateBy { it.key }
+        val game = pr("NFL Football: Texans at Colts")
+        val items = Sports.group(listOf("1" to game, "2" to game, "3" to game.copy(startMs = t0 + 60_000), "9" to pr("Duke vs. UNC")), by, favorites = setOf("3"))
+        assertEquals(2, items.size)
+        val g = items.first { it.title.contains("Texans") }
+        assertEquals(listOf("3", "2", "1"), g.channels.map { it.key }) // favourite first, then HD before SD
+        assertEquals("Texans", Follows.matches("NFL Football: Houston Texans at Indianapolis Colts", listOf("Cowboys", "Texans")))
+        assertNull(Follows.matches("Texas Tech vs. Baylor", listOf("Tex")))
+    }
+
     @Test fun nameNormalization() {
         assertEquals("espn", EpgMatcher.normalize("US: ESPN HD (East)"))
         assertEquals("sportsone", EpgMatcher.normalize("|US| Sports One FHD"))

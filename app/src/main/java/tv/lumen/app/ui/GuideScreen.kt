@@ -97,6 +97,20 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
     val minStart = (now - maxBack) - (now - maxBack) % HALF_HOUR
     val maxStart = now + 2 * 86_400_000L
     var focused by remember { mutableStateOf<Focused?>(null) }
+    val settings by vm.store.settings.collectAsStateWithLifecycle()
+    // Live picture: starts on the channel you last watched, then follows the highlighted
+    // channel once you've rested on it for a couple of seconds (never more than one switch per 4 s).
+    var previewKey by remember { mutableStateOf(vm.focusMemory["guidePreview"] ?: prefs.recent.firstOrNull()) }
+    var lastSwitch by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(focused?.ch?.key) {
+        val k = focused?.ch?.key ?: return@LaunchedEffect
+        if (k == previewKey) return@LaunchedEffect
+        delay(2_200)
+        val wait = 4_000 - (System.currentTimeMillis() - lastSwitch)
+        if (wait > 0) delay(wait)
+        previewKey = k; lastSwitch = System.currentTimeMillis()
+        vm.focusMemory["guidePreview"] = k
+    }
     val reminderStarts = remember(prefs.reminders) {
         prefs.reminders.groupBy { it.channelKey }.mapValues { (_, l) -> l.map { it.startMs }.toSet() }
     }
@@ -108,29 +122,39 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
     )
 
     Column(Modifier.fillMaxSize().padding(start = 24.dp, top = 20.dp, end = 20.dp)) {
-        // Header + details of the focused program
+        // Header + details of the focused program, with a small live picture on the right.
         Row(verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
-                Text("Live guide", style = T.h1)
-                Text("${fmtDay(now)} · ${fmtClock(now)}", style = T.meta)
+                // Header + details of the focused program
+                Row(verticalAlignment = Alignment.Top) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Live guide", style = T.h1)
+                        Text("${fmtDay(now)} · ${fmtClock(now)}", style = T.meta)
+                    }
+                    RefreshButton(vm, repo)
+                }
+                Spacer(Modifier.height(8.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(prefs.allLists, key = { it.id }) { l ->
+                        PillButton("${l.name} · ${l.keys.size}", onClick = { choose("list:" + l.id) }, selected = filter == "list:" + l.id)
+                    }
+                    item { PillButton("Recently watched · ${prefs.recent.size}", onClick = { choose("recent") }, selected = filter == "recent") }
+                    item { PillButton("Most watched", onClick = { choose("most") }, selected = filter == "most") }
+                    item { PillButton("All · ${visible.size}", onClick = { choose("all") }, selected = filter == "all") }
+                    item {
+                        PillButton(if (categoryName != null) "$categoryName ▾" else "Categories ▾",
+                            onClick = { pickingCategory = true }, selected = categoryName != null)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                DetailStrip(vm, focused, now, Modifier.fillMaxWidth().height(58.dp))
             }
-            RefreshButton(vm, repo)
+            val pch = previewKey?.let { k -> visible.firstOrNull { it.key == k } }
+            if (settings.guidePreview && pch != null) {
+                Spacer(Modifier.width(14.dp))
+                GuidePreview(vm, pch, Modifier.width(240.dp).height(135.dp))
+            }
         }
-        Spacer(Modifier.height(8.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(prefs.allLists, key = { it.id }) { l ->
-                PillButton("${l.name} · ${l.keys.size}", onClick = { choose("list:" + l.id) }, selected = filter == "list:" + l.id)
-            }
-            item { PillButton("Recently watched · ${prefs.recent.size}", onClick = { choose("recent") }, selected = filter == "recent") }
-            item { PillButton("Most watched", onClick = { choose("most") }, selected = filter == "most") }
-            item { PillButton("All · ${visible.size}", onClick = { choose("all") }, selected = filter == "all") }
-            item {
-                PillButton(if (categoryName != null) "$categoryName ▾" else "Categories ▾",
-                    onClick = { pickingCategory = true }, selected = categoryName != null)
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        DetailStrip(vm, focused, now, Modifier.fillMaxWidth().height(58.dp))
         if (rows.isEmpty()) {
             Text(when {
                 filter == "recent" -> "Channels you watch will show up here."
@@ -181,6 +205,8 @@ fun GuideScreen(vm: MainViewModel, repo: RepoState) {
                             favorite = ch.key in prefs.favorites,
                             zap = zap,
                             watchedSec = if (filter == "most") prefs.watchSec[ch.key] else null,
+                            favNumber = prefs.favoriteNumber(ch.key),
+                            follows = prefs.follows,
                             reminders = reminderStarts[ch.key].orEmpty(),
                             requestFocus = !restored && ch.key == restoreKey,
                             onRestored = { restored = true },
@@ -229,6 +255,8 @@ private fun GuideRow(
     favorite: Boolean,
     zap: List<String>?,
     watchedSec: Long?,
+    favNumber: Int?,
+    follows: List<String>,
     reminders: Set<Long>,
     requestFocus: Boolean,
     onRestored: () -> Unit,
@@ -249,7 +277,7 @@ private fun GuideRow(
                 ChannelLogo(ch, Modifier.width(40.dp).height(28.dp).clip(RoundedCornerShape(5.dp)).background(C.Surface2), monogramSize = 22.dp)
                 Spacer(Modifier.width(6.dp))
                 Column {
-                    OneLine((if (favorite) "★ " else "") + ch.name, T.title.copy(color = C.Text2))
+                    OneLine((if (favNumber != null) "★$favNumber  " else "") + ch.name, T.title.copy(color = C.Text2))
                     if (watchedSec != null) Text(fmtWatched(watchedSec), style = T.meta)
                 }
             }
@@ -298,11 +326,12 @@ private fun GuideRow(
                     focusedColor = C.Text,
                     scale = 1f, ring = false,
                     onFocus = { if (it) onFocus(p) },
-                    onMenu = { vm.openChannelMenu(ch) },
+                    onMenu = { vm.openProgramMenu(ch, p) },
                 ) { f ->
                     Column(Modifier.align(Alignment.CenterStart).padding(horizontal = 8.dp)) {
                         OneLine(p.title.ifBlank { "Untitled" }, T.title.copy(color = if (f) C.Ink else if (past) C.Faint else C.Text))
-                        val tag = when { replay -> "  ·  REPLAY"; reminder -> "  ·  REMINDER SET"; else -> "" }
+                        val followed = follows.isNotEmpty() && lumen.core.Follows.matches(p.title, follows) != null
+                        val tag = when { followed -> "  ·  ★ FOLLOWING"; replay -> "  ·  REPLAY"; reminder -> "  ·  REMINDER SET"; else -> "" }
                         OneLine(fmtRange(p) + tag, T.meta.copy(color = if (f) C.Ink.copy(alpha = 0.7f) else C.Faint))
                     }
                 }
@@ -335,6 +364,28 @@ private fun DetailStrip(vm: MainViewModel, f: Focused?, now: Long, modifier: Mod
         }
         Text(line, style = T.meta)
         p?.description?.let { OneLine(it, T.meta.copy(color = C.Text2)) }
+        }
+    }
+}
+
+
+/** The guide's small live picture. OK makes it full screen. Uses one stream while shown. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun GuidePreview(vm: MainViewModel, ch: Channel, modifier: Modifier) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val player = remember { tv.lumen.app.player.PlayerFactory.create(ctx, small = true) }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { player.release() } }
+    LaunchedEffect(ch.key) { tv.lumen.app.player.PlayerFactory.play(player, vm.liveUrl(ch)) }
+    Focusable(onClick = { vm.playChannel(ch, exact = true) }, modifier = modifier, color = androidx.compose.ui.graphics.Color.Black, scale = 1.03f) {
+        VideoSurface(player, Modifier.fillMaxSize())
+        Row(
+            Modifier.align(Alignment.BottomStart).padding(6.dp).clip(RoundedCornerShape(4.dp))
+                .background(C.Ink.copy(alpha = 0.75f)).padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            LiveChip()
+            OneLine(ch.name, T.meta.copy(color = C.Text))
         }
     }
 }

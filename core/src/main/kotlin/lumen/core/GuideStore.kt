@@ -12,6 +12,16 @@ interface ProgramStore {
     fun window(epgId: String, fromMs: Long, toMs: Long): List<Program>
     /** Programmes whose title contains [query] (case-insensitive) and end after [nowMs], soonest first. */
     fun search(query: String, nowMs: Long, limit: Int): List<Program>
+    /** See [Guide.matching]; returns programmes with channelId = XMLTV id. */
+    fun matching(fromMs: Long, toMs: Long, titleWords: List<String>, categoryWords: List<String>, limit: Int): List<Program>
+}
+
+object ProgramFilter {
+    fun matches(p: Program, titleWords: List<String>, categoryWords: List<String>): Boolean {
+        if (titleWords.any { p.title.contains(it, ignoreCase = true) }) return true
+        val c = p.category ?: return false
+        return categoryWords.any { c.contains(it, ignoreCase = true) }
+    }
 }
 
 /** In-memory [ProgramStore], used in tests and as the shape a database must match. */
@@ -21,6 +31,8 @@ class MemoryProgramStore(private val data: XmltvData) : ProgramStore {
     override fun epgChannels() = data.channels
     override fun window(epgId: String, fromMs: Long, toMs: Long) = index.window(epgId, fromMs, toMs)
     override fun search(query: String, nowMs: Long, limit: Int) = index.search(query, nowMs, limit).map { it.second }
+    override fun matching(fromMs: Long, toMs: Long, titleWords: List<String>, categoryWords: List<String>, limit: Int) =
+        index.matching(fromMs, toMs, titleWords, categoryWords, limit).map { it.second }
 }
 
 /**
@@ -72,6 +84,10 @@ class StoreGuide(
             .flatMap { p -> epgToKeys[p.channelId].orEmpty().take(1).map { it to p } }
             .take(limit)
     }
+
+    override fun matching(fromMs: Long, toMs: Long, titleWords: List<String>, categoryWords: List<String>, limit: Int):
+        List<Pair<String, Program>> =
+        store.matching(fromMs, toMs, titleWords, categoryWords, limit).flatMap { p -> epgToKeys[p.channelId].orEmpty().map { it to p } }
 
     @Synchronized
     fun clearCache() = cache.clear()

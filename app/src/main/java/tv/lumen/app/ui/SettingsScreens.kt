@@ -57,6 +57,8 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
     var confirmSignOut by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<String?>(null) }
+    var followField by remember { mutableStateOf("") }
+    val prefs by vm.store.prefs.collectAsStateWithLifecycle()
     val profiles by vm.store.profiles.collectAsStateWithLifecycle()
     val currentProfile by vm.store.profileId.collectAsStateWithLifecycle()
     var pinField by remember { mutableStateOf("") }
@@ -148,6 +150,16 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
             }
         }
         item {
+            Toggle("Start with the smoothest version of a channel (learns from HD/SD/East/West freezes)", settings.smartVersions) {
+                vm.store.updateSettings { it.copy(smartVersions = !it.smartVersions) }
+            }
+        }
+        item {
+            Toggle("Live picture in the guide (follows the channel you highlight; uses one stream)", settings.guidePreview) {
+                vm.store.updateSettings { it.copy(guidePreview = !it.guidePreview) }
+            }
+        }
+        item {
             Toggle("Open straight into the last channel you watched", settings.startOnLastChannel) {
                 vm.store.updateSettings { it.copy(startOnLastChannel = !it.startOnLastChannel) }
             }
@@ -221,6 +233,26 @@ fun SettingsScreen(vm: MainViewModel, repo: RepoState) {
             }
         }
         item { PillButton("Add a profile", onClick = { vm.profileMenu = true }) }
+
+        item { Heading("Teams & shows you follow") }
+        item {
+            Text(if (prefs.follows.isEmpty()) "None yet. In the guide or a sports row, press ≡ on a game and choose a team to follow, or add one here."
+                else "Followed teams and shows are highlighted in the guide, get their own row on Home, and you'll get a heads-up before they start.", style = T.body)
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                prefs.follows.forEach { f -> PillButton("$f  ✕", onClick = { vm.toggleFollow(f) }) }
+            }
+        }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = followField, onValueChange = { followField = it.take(40) }, singleLine = true,
+                    label = { Text("Team or show, e.g. Texans") }, colors = fieldColors(), modifier = Modifier.width(300.dp),
+                )
+                PillButton("Follow", onClick = { if (followField.isNotBlank()) { vm.toggleFollow(followField.trim()); followField = "" } })
+            }
+        }
 
         item { Heading("My channels") }
         item { Text("Favorites and your own lists. Press ≡ on any channel to add it to one.", style = T.body) }

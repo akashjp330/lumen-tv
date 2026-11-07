@@ -176,6 +176,7 @@ fun SearchScreen(vm: MainViewModel, repo: RepoState) {
                         Focusable(
                             onClick = { pick("p:" + ch.key + p.startMs) { if (p.startMs <= now) vm.playChannel(ch) else vm.toggleReminder(ch, p) } },
                             modifier = Modifier.width(220.dp).height(64.dp).restorable("p:" + ch.key + p.startMs),
+                            onMenu = { vm.openProgramMenu(ch, p) },
                         ) {
                             Column(Modifier.padding(10.dp)) {
                                 OneLine(p.title, T.title)
