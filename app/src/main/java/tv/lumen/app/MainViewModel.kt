@@ -164,7 +164,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Plays a channel. Unless [exact], a version that's been noticeably smoother
      * (HD/SD/East/West of the same channel) is played instead, with an offer to undo.
      */
-    fun playChannel(ch: Channel, replace: Boolean = false, zapKeys: List<String>? = null, exact: Boolean = false) =
+    fun playChannel(ch: Channel, replace: Boolean = false, zapKeys: List<String>? = null, exact: Boolean = false): Unit =
         guarded(ContentType.LIVE, ch.categoryId) {
             val target = if (exact) ch else smootherVersion(ch) ?: ch
             store.pushRecent(target.key)
